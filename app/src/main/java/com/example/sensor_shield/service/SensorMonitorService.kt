@@ -30,8 +30,9 @@ import kotlinx.coroutines.*
 class SensorMonitorService : Service() {
 
     companion object {
-        private const val ACTION_KILL_APP = "com.example.sensor_shield.ACTION_KILL_APP"
-        private const val EXTRA_PACKAGE_NAME = "extra_package_name"
+        const val ACTION_KILL_APP = "com.example.sensor_shield.ACTION_KILL_APP"
+        const val ACTION_REVOKE_APP = "com.example.sensor_shield.ACTION_REVOKE_APP"
+        const val EXTRA_PACKAGE_NAME = "extra_package_name"
     }
 
     private val TAG = "SensorShield"
@@ -47,46 +48,6 @@ class SensorMonitorService : Service() {
     private lateinit var cameraManager: CameraManager
     private lateinit var appOpsManager: AppOpsManager
     private lateinit var activityManager: ActivityManager
-
-    private val killReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == ACTION_KILL_APP) {
-                val pkg = intent.getStringExtra(EXTRA_PACKAGE_NAME)
-                if (pkg != null) {
-                    Log.w(TAG, "Kill command received for: $pkg")
-                    
-                    // 1. Force dismiss the notification
-                    val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                    notificationManager.cancel(pkg.hashCode())
-
-                    // 2. Try to kill background processes
-                    try {
-                        activityManager.killBackgroundProcesses(pkg)
-                        Log.d(TAG, "killBackgroundProcesses called for $pkg")
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error killing processes: ${e.message}")
-                    }
-
-                    // 3. Open App Info settings for manual "Force Stop"
-                    // This is the ONLY reliable way on modern Android for non-system apps
-                    try {
-                        val settingsIntent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                            data = Uri.fromParts("package", pkg, null)
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                            addFlags(Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS)
-                        }
-                        context?.startActivity(settingsIntent)
-                        
-                        Toast.makeText(context, "Tap 'FORCE STOP' to terminate $pkg immediately", Toast.LENGTH_LONG).show()
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error opening settings: ${e.message}")
-                        Toast.makeText(context, "Could not open settings for $pkg", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }
-        }
-    }
 
     /**
      * AppOps listener (camera, mic, location)
@@ -123,15 +84,6 @@ class SensorMonitorService : Service() {
             startForeground(notificationId, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } else {
             startForeground(notificationId, notification)
-        }
-
-        // Register receiver as EXPORTED so SystemUI can trigger it
-        val filter = IntentFilter(ACTION_KILL_APP)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(killReceiver, filter, Context.RECEIVER_EXPORTED)
-        } else {
-            @Suppress("UnspecifiedRegisterReceiverFlag")
-            registerReceiver(killReceiver, filter)
         }
 
         setupMonitoring()
@@ -258,16 +210,24 @@ class SensorMonitorService : Service() {
             else -> "🔍 Suspicious Activity" to NotificationCompat.PRIORITY_DEFAULT
         }
 
-        // Kill Action
-        val killIntent = Intent(ACTION_KILL_APP).apply {
+        // Kill Intent - using NotificationActionActivity to ensure it works from background
+        val killIntent = Intent(this, NotificationActionActivity::class.java).apply {
+            action = ACTION_KILL_APP
             putExtra(EXTRA_PACKAGE_NAME, packageName)
-            `package` = this@SensorMonitorService.packageName
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
         }
-        val killPendingIntent = PendingIntent.getBroadcast(
-            this, 
-            packageName.hashCode(), 
-            killIntent, 
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        val killPendingIntent = PendingIntent.getActivity(
+            this, packageName.hashCode() + 1, killIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        // Revoke Intent
+        val revokeIntent = Intent(this, NotificationActionActivity::class.java).apply {
+            action = ACTION_REVOKE_APP
+            putExtra(EXTRA_PACKAGE_NAME, packageName)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+        }
+        val revokePendingIntent = PendingIntent.getActivity(
+            this, packageName.hashCode() + 2, revokeIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
         val notification = NotificationCompat.Builder(this, alertChannelId)
@@ -278,6 +238,7 @@ class SensorMonitorService : Service() {
             .setCategory(NotificationCompat.CATEGORY_ALARM)
             .setAutoCancel(true)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Kill App", killPendingIntent)
+            .addAction(android.R.drawable.ic_menu_manage, "Revoke", revokePendingIntent)
             .build()
         
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -319,9 +280,6 @@ class SensorMonitorService : Service() {
     }
 
     override fun onDestroy() {
-        try {
-            unregisterReceiver(killReceiver)
-        } catch (e: Exception) { /* ignore */ }
         serviceScope.cancel()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && opListener != null) {
             appOpsManager.stopWatchingActive(opListener)

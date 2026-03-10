@@ -20,13 +20,28 @@ class SensorViewModel(application: Application) : AndroidViewModel(application) 
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     fun getPrivacyScore(events: List<SensorEvent>): Int {
-        if (events.isEmpty()) return 100
-        val avgRisk = events.map { it.riskScore }.average()
-        return (100 - (avgRisk * 100)).toInt().coerceIn(0, 100)
+        // Only calculate score based on recent events (last 24h) for accuracy
+        val recentEvents = events.filter { it.timestamp > System.currentTimeMillis() - 86400000 }
+        if (recentEvents.isEmpty()) return 100
+
+        // Penalty-based scoring is more accurate for security than simple average
+        val criticalCount = recentEvents.count { it.riskScore >= 0.75 }
+        val unexpectedCount = recentEvents.count { it.riskScore >= 0.5 && it.riskScore < 0.75 }
+        val suspiciousCount = recentEvents.count { it.riskScore >= 0.3 && it.riskScore < 0.5 }
+
+        val totalPenalty = (criticalCount * 25) + (unexpectedCount * 10) + (suspiciousCount * 2)
+        return (100 - totalPenalty).coerceIn(0, 100)
+    }
+
+    fun getSuspiciousCount(events: List<SensorEvent>): Int {
+        // Total count of events that were flagged as SUSPICIOUS, UNEXPECTED, or CRITICAL
+        return events.count { it.riskScore >= 0.3 }
     }
 
     fun getTopSuspects(events: List<SensorEvent>): List<Pair<String, Int>> {
-        return events.filter { it.riskScore > 0.4 }
+        // Focus on apps with risky behavior in the last 48 hours
+        val recentWindow = System.currentTimeMillis() - (48 * 3600000)
+        return events.filter { it.timestamp > recentWindow && it.riskScore >= 0.4 }
             .groupBy { it.packageName }
             .mapValues { it.value.size }
             .toList()

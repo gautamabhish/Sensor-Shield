@@ -36,6 +36,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -53,75 +54,88 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             SensorShieldTheme {
-                PermissionGate {
+                PermissionScreen {
                     MainContainer()
                 }
             }
         }
+        startMonitor(this)
     }
 }
 
 @Composable
-fun PermissionGate(content: @Composable () -> Unit) {
+fun PermissionScreen(content: @Composable () -> Unit) {
     val context = LocalContext.current
-    val permissionsToRequest = mutableListOf(
+    val permissionsToRequest = arrayOf(
         Manifest.permission.CAMERA,
         Manifest.permission.RECORD_AUDIO,
         Manifest.permission.ACCESS_FINE_LOCATION,
         Manifest.permission.ACCESS_COARSE_LOCATION
-    ).apply {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            add(Manifest.permission.POST_NOTIFICATIONS)
-        }
-    }
+    )
 
-    var allGranted by remember { 
-        mutableStateOf(permissionsToRequest.all { 
-            ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED 
-        } && hasUsageStatsPermission(context)) 
+    var allGranted by remember {
+        mutableStateOf(
+            permissionsToRequest.all {
+                ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
+            } && hasUsageStatsPermission(context)
+        )
     }
 
     val launcher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { results ->
-        if (results.all { it.value } && hasUsageStatsPermission(context)) {
+    ) { result ->
+        if (result.values.all { it } && hasUsageStatsPermission(context)) {
             allGranted = true
         }
     }
 
     if (allGranted) {
-        LaunchedEffect(Unit) { startMonitor(context) }
         content()
     } else {
-        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).padding(24.dp), contentAlignment = Alignment.Center) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Icon(Icons.Rounded.Lock, null, modifier = Modifier.size(64.dp), tint = MaterialTheme.colorScheme.primary)
+        Box(
+            modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.padding(32.dp)
+            ) {
+                Icon(
+                    Icons.Rounded.Security,
+                    null,
+                    modifier = Modifier.size(64.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
                 Spacer(Modifier.height(24.dp))
-                Text("Permissions Required", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(8.dp))
-                Text("To protect your privacy, Sensor Shield needs access to monitor hardware activity and usage statistics.", 
-                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                Text(
+                    "Security Clearance Required",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    "Shield Enterprise requires low-level kernel access to monitor hardware vectors.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 8.dp),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                )
                 Spacer(Modifier.height(32.dp))
                 
-                Button(
-                    onClick = { launcher.launch(permissionsToRequest.toTypedArray()) },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Text("Grant Sensor Permissions")
-                }
-                
-                Spacer(Modifier.height(12.dp))
-                
-                if (!hasUsageStatsPermission(context)) {
-                    OutlinedButton(
-                        onClick = { 
+                if (permissionsToRequest.any { ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED }) {
+                    Button(
+                        onClick = { launcher.launch(permissionsToRequest) },
+                        modifier = Modifier.fillMaxWidth().height(56.dp)
+                    ) {
+                        Text("Grant Hardware Access")
+                    }
+                } else if (!hasUsageStatsPermission(context)) {
+                    Button(
+                        onClick = {
                             context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS).apply {
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                data = Uri.fromParts("package", context.packageName, null)
                             })
                         },
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp)
+                        modifier = Modifier.fillMaxWidth().height(56.dp)
                     ) {
                         Text("Grant Usage Access")
                     }
@@ -166,6 +180,7 @@ fun MainContainer(viewModel: SensorViewModel = viewModel()) {
     val events by viewModel.allEvents.collectAsState(initial = emptyList())
     val privacyScore = viewModel.getPrivacyScore(events)
     val suspects = viewModel.getTopSuspects(events)
+    val suspiciousCount = viewModel.getSuspiciousCount(events)
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -181,7 +196,7 @@ fun MainContainer(viewModel: SensorViewModel = viewModel()) {
                 }, label = "TabSwitch"
             ) { tab ->
                 when (tab) {
-                    0 -> Dashboard(events, privacyScore, suspects) { selectedTab = 1 }
+                    0 -> Dashboard(events, privacyScore, suspiciousCount, suspects) { selectedTab = 1 }
                     1 -> LogScreen(events)
                     2 -> StatsScreen(events)
                     3 -> SettingsScreen()
@@ -192,14 +207,14 @@ fun MainContainer(viewModel: SensorViewModel = viewModel()) {
 }
 
 @Composable
-fun Dashboard(events: List<SensorEvent>, score: Int, suspects: List<Pair<String, Int>>, onSeeAll: () -> Unit) {
+fun Dashboard(events: List<SensorEvent>, score: Int, suspiciousCount: Int, suspects: List<Pair<String, Int>>, onSeeAll: () -> Unit) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(top = 24.dp, start = 20.dp, end = 20.dp, bottom = 32.dp),
         verticalArrangement = Arrangement.spacedBy(28.dp)
     ) {
         item { HeaderSection() }
-        item { MainScoreCard(score, events.size) }
+        item { MainScoreCard(score, suspiciousCount) }
         
         if (suspects.isNotEmpty()) {
             item {
@@ -212,9 +227,13 @@ fun Dashboard(events: List<SensorEvent>, score: Int, suspects: List<Pair<String,
             SectionHeader("Active Surveillance", "Real-time hardware status")
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 val recent = events.filter { it.timestamp > System.currentTimeMillis() - 15000 }
-                StatusTile("Visual", Icons.Rounded.CameraAlt, recent.any { it.sensorType.contains("camera", true) }, Modifier.weight(1f))
-                StatusTile("Acoustic", Icons.Rounded.Mic, recent.any { it.sensorType.contains("audio", true) || it.sensorType.contains("mic", true) }, Modifier.weight(1f))
-                StatusTile("Geospatial", Icons.Rounded.LocationOn, recent.any { it.sensorType.contains("location", true) }, Modifier.weight(1f))
+                val cameraEvent = recent.find { it.sensorType.contains("camera", true) }
+                val micEvent = recent.find { it.sensorType.contains("audio", true) || it.sensorType.contains("mic", true) }
+                val locEvent = recent.find { it.sensorType.contains("location", true) }
+
+                StatusTile("Visual", Icons.Rounded.CameraAlt, cameraEvent != null, cameraEvent?.packageName, Modifier.weight(1f))
+                StatusTile("Acoustic", Icons.Rounded.Mic, micEvent != null, micEvent?.packageName, Modifier.weight(1f))
+                StatusTile("Geospatial", Icons.Rounded.LocationOn, locEvent != null, locEvent?.packageName, Modifier.weight(1f))
             }
         }
 
@@ -272,7 +291,7 @@ fun HeaderSection() {
 }
 
 @Composable
-fun MainScoreCard(score: Int, totalEvents: Int) {
+fun MainScoreCard(score: Int, suspiciousCount: Int) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(28.dp),
@@ -310,7 +329,7 @@ fun MainScoreCard(score: Int, totalEvents: Int) {
                 )
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "$totalEvents suspicious patterns analyzed",
+                    "$suspiciousCount suspicious patterns analyzed",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -353,7 +372,7 @@ fun SuspectsCard(suspects: List<Pair<String, Int>>) {
 }
 
 @Composable
-fun StatusTile(label: String, icon: ImageVector, active: Boolean, modifier: Modifier) {
+fun StatusTile(label: String, icon: ImageVector, active: Boolean, packageName: String? = null, modifier: Modifier) {
     val color = if (active) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
     Surface(
         modifier = modifier,
@@ -368,7 +387,21 @@ fun StatusTile(label: String, icon: ImageVector, active: Boolean, modifier: Modi
             Icon(icon, null, tint = if (active) color else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
             Spacer(Modifier.height(8.dp))
             Text(label, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
-            Text(if (active) "SURVEILLANCE" else "SECURE", fontSize = 8.sp, color = if (active) color else MaterialTheme.colorScheme.tertiary, fontWeight = FontWeight.Black)
+            
+            val statusText = if (active) {
+                packageName?.split(".")?.last()?.replaceFirstChar { it.uppercase() } ?: "SURVEILLANCE"
+            } else {
+                "SECURE"
+            }
+            
+            Text(
+                text = statusText,
+                fontSize = 8.sp,
+                color = if (active) color else MaterialTheme.colorScheme.tertiary,
+                fontWeight = FontWeight.Black,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
         }
     }
 }
