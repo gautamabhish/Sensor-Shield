@@ -1,5 +1,6 @@
 package com.example.sensor_shield.engine
 
+
 object RiskEngine {
 
     fun calculateRisk(
@@ -11,30 +12,21 @@ object RiskEngine {
 
         var score = 0.0
 
-        // Sensor sensitivity
         when (sensorType) {
-            "android:camera" -> score += 0.25
-            "android:record_audio", "android:microphone" -> score += 0.25
-            "android:fine_location", "android:coarse_location" -> score += 0.15
+            "android:camera" -> score += 0.35
+            "android:record_audio", "android:microphone" -> score += 0.35
+            "android:fine_location", "android:coarse_location" -> score += 0.20
         }
 
-        // Background usage
         if (!isForeground) {
-            score += 0.30
+            score += 0.40
         }
 
-        // Screen off suspicious behavior
-        if (!isScreenOn && (sensorType.contains("camera") || sensorType.contains("audio"))) {
+        if (!isScreenOn && sensorType.contains("camera")) {
             score += 0.20
         }
 
-        // Trust level
-        val trustScore = trustAdjustment(packageName)
-        score += trustScore
-
-        // Fake ML score (placeholder for TFLite later)
-        val mlScore = simulateMLInference(packageName, sensorType)
-        score += mlScore
+        score += trustAdjustment(packageName)
 
         val finalScore = score.coerceIn(0.0, 1.0)
 
@@ -47,24 +39,17 @@ object RiskEngine {
     private fun trustAdjustment(packageName: String): Double {
 
         return when {
+
+            packageName.contains("incallui") -> -0.20
+            packageName.contains("dialer") -> -0.20
+            packageName.contains("phone") -> -0.20
+
             packageName.startsWith("com.android") -> -0.15
             packageName.startsWith("com.google") -> -0.10
             packageName.startsWith("com.whatsapp") -> -0.05
+
             else -> 0.10
         }
-    }
-
-    private fun simulateMLInference(
-        packageName: String,
-        sensorType: String
-    ): Double {
-
-        // Stub ML anomaly signal
-        if (packageName.contains("system", ignoreCase = true)) {
-            return 0.05
-        }
-
-        return 0.10
     }
 
     data class RiskResult(

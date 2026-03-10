@@ -46,6 +46,7 @@ import com.example.sensor_shield.ui.SensorViewModel
 import com.example.sensor_shield.ui.theme.SensorShieldTheme
 import java.text.SimpleDateFormat
 import java.util.*
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -77,50 +78,30 @@ fun MainContainer(viewModel: SensorViewModel = viewModel()) {
         } else { startMonitor(context) }
     }
 
-    Scaffold(
-        bottomBar = {
-            PremiumNavigationBar(selectedTab) { selectedTab = it }
-        }
-    ) { padding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .background(MaterialTheme.colorScheme.background)
-        ) {
-            // Premium background effects
-            Box(modifier = Modifier
-                .size(400.dp)
-                .offset(x = (-200).dp, y = (-100).dp)
-                .blur(100.dp)
-                .background(MaterialTheme.colorScheme.primary.copy(0.08f), CircleShape))
-            
-            Box(modifier = Modifier
-                .size(300.dp)
-                .align(Alignment.BottomEnd)
-                .offset(x = 150.dp, y = 150.dp)
-                .blur(100.dp)
-                .background(MaterialTheme.colorScheme.secondary.copy(0.08f), CircleShape))
-
-            AnimatedContent(
-                targetState = selectedTab,
-                transitionSpec = {
-                    val direction = if (targetState > initialState) 1 else -1
-                    (fadeIn(tween(500)) + slideInHorizontally(tween(500)) { it * direction })
-                        .togetherWith(fadeOut(tween(400)) + slideOutHorizontally(tween(400)) { -it * direction })
-                }, label = "TabSwitch"
-            ) { tab ->
-                when (tab) {
-                    0 -> Dashboard(
-                        events,
-                        privacyScore
-                    ) {
-                        selectedTab = 1
+    Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        PremiumBackground()
+        
+        Scaffold(
+            containerColor = Color.Transparent,
+            bottomBar = {
+                PremiumNavigationBar(selectedTab) { selectedTab = it }
+            }
+        ) { padding ->
+            Box(modifier = Modifier.padding(padding)) {
+                AnimatedContent(
+                    targetState = selectedTab,
+                    transitionSpec = {
+                        val direction = if (targetState > initialState) 1 else -1
+                        (fadeIn(tween(500)) + slideInHorizontally(tween(500)) { it * direction })
+                            .togetherWith(fadeOut(tween(400)) + slideOutHorizontally(tween(400)) { -it * direction })
+                    }, label = "TabSwitch"
+                ) { tab ->
+                    when (tab) {
+                        0 -> Dashboard(events, privacyScore) { selectedTab = 1 }
+                        1 -> LogScreen(events)
+                        2 -> StatsScreen(events)
+                        3 -> SettingsScreen()
                     }
-
-                    1 -> LogScreen(events)
-                    2 -> StatsScreen(events)
-                    3 -> SettingsScreen()
                 }
             }
         }
@@ -128,11 +109,46 @@ fun MainContainer(viewModel: SensorViewModel = viewModel()) {
 }
 
 @Composable
-fun Dashboard(
-    events: List<SensorEvent>,
-    score: Int,
-    onViewAll: () -> Unit
-) {
+fun PremiumBackground() {
+    val infiniteTransition = rememberInfiniteTransition(label = "bg")
+    val offsetX by infiniteTransition.animateFloat(
+        initialValue = -100f,
+        targetValue = 100f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(15000, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ), label = "x"
+    )
+    val offsetY by infiniteTransition.animateFloat(
+        initialValue = -50f,
+        targetValue = 50f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(12000, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ), label = "y"
+    )
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        Box(
+            modifier = Modifier
+                .size(450.dp)
+                .offset(x = (-150).dp + offsetX.dp, y = (-100).dp + offsetY.dp)
+                .blur(120.dp)
+                .background(MaterialTheme.colorScheme.primary.copy(0.12f), CircleShape)
+        )
+        Box(
+            modifier = Modifier
+                .size(350.dp)
+                .align(Alignment.BottomEnd)
+                .offset(x = 100.dp - offsetX.dp, y = 100.dp - offsetY.dp)
+                .blur(120.dp)
+                .background(MaterialTheme.colorScheme.secondary.copy(0.1f), CircleShape)
+        )
+    }
+}
+
+@Composable
+fun Dashboard(events: List<SensorEvent>, score: Int, onSeeAll: () -> Unit) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(20.dp),
@@ -140,11 +156,11 @@ fun Dashboard(
     ) {
         item { HeaderSection() }
         item { ScoreCard(score, events.size) }
-        item { 
-            SectionTitle("Live Shield")
-            LiveIndicators(events) 
+        item {
+            SectionTitle("Shield Status")
+            LiveIndicators(events)
         }
-        item { 
+        item {
             SectionTitle("Activity Grid")
             HeatmapGrid(events)
         }
@@ -155,10 +171,26 @@ fun Dashboard(
                     "View All",
                     color = MaterialTheme.colorScheme.primary,
                     style = MaterialTheme.typography.labelLarge,
-                    modifier = Modifier.clickable { onViewAll() }
+                    modifier = Modifier.clickable { onSeeAll() }.padding(bottom = 12.dp)
                 )
             }
             RecentList(events)
+        }
+    }
+}
+
+@Composable
+fun HeaderSection() {
+    Row(modifier = Modifier.fillMaxWidth().padding(top = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("Privacy Shield", fontSize = 34.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-1.5).sp)
+            Text("Active Protection Enabled", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+        }
+        IconButton(
+            onClick = {},
+            modifier = Modifier.size(52.dp).background(MaterialTheme.colorScheme.surfaceVariant.copy(0.5f), CircleShape)
+        ) {
+            Icon(Icons.Rounded.Security, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(28.dp))
         }
     }
 }
@@ -174,13 +206,13 @@ fun ScoreCard(score: Int, eventCount: Int) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(32.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(2.dp))
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(2.dp).copy(alpha = 0.7f))
     ) {
         Row(
             modifier = Modifier.padding(24.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(contentAlignment = Alignment.Center, modifier = Modifier.size(115.dp)) {
+            Box(contentAlignment = Alignment.Center, modifier = Modifier.size(110.dp)) {
                 CircularProgressIndicator(
                     progress = { 1f },
                     modifier = Modifier.fillMaxSize(),
@@ -196,21 +228,21 @@ fun ScoreCard(score: Int, eventCount: Int) {
                     color = if (score > 75) Color(0xFF4CAF50) else if (score > 40) Color(0xFFFFA000) else Color(0xFFF44336)
                 )
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("${animatedScore.toInt()}%", fontWeight = FontWeight.ExtraBold, fontSize = 28.sp)
+                    Text("${animatedScore.toInt()}%", fontWeight = FontWeight.ExtraBold, fontSize = 26.sp)
                     Text("Secure", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
                 }
             }
             Spacer(Modifier.width(24.dp))
             Column {
-                Text("System Health", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text("Defense Status", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                 Text(
-                    if (score > 75) "Optimal Defense" else if (score > 40) "Partial Risk" else "Unsafe Mode",
+                    if (score > 75) "Optimal Protection" else if (score > 40) "Moderate Risk" else "Highly Vulnerable",
                     color = if (score > 75) Color(0xFF4CAF50) else if (score > 40) Color(0xFFFFA000) else Color(0xFFF44336),
                     style = MaterialTheme.typography.bodyLarge,
                     fontWeight = FontWeight.SemiBold
                 )
-                Spacer(Modifier.height(6.dp))
-                Text("Total events: $eventCount", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                Spacer(Modifier.height(4.dp))
+                Text("$eventCount logs analyzed", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
             }
         }
     }
@@ -242,7 +274,7 @@ fun SensorBlob(label: String, icon: ImageVector, active: Boolean) {
             contentAlignment = Alignment.Center
         ) {
             if (active) {
-                Box(Modifier.size(60.dp).background(color.copy(0.1f), CircleShape))
+                Box(Modifier.size(58.dp).background(color.copy(0.1f), CircleShape))
             }
             Icon(icon, null, tint = if (active) Color(0xFFF44336) else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(28.dp))
         }
@@ -253,11 +285,8 @@ fun SensorBlob(label: String, icon: ImageVector, active: Boolean) {
 
 @Composable
 fun HeatmapGrid(events: List<SensorEvent>) {
-
     val now = System.currentTimeMillis()
-
     var selectedIndex by remember { mutableStateOf<Int?>(null) }
-
     val buckets = remember(events) {
         List(48) { index ->
             val start = now - (48 - index) * 3600000
@@ -269,154 +298,83 @@ fun HeatmapGrid(events: List<SensorEvent>) {
     Card(
         Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(24.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(1.dp)
-        )
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(1.dp).copy(alpha = 0.7f))
     ) {
-
         Column(Modifier.padding(20.dp)) {
-
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 repeat(12) { col ->
-
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         repeat(4) { row ->
-
                             val index = col * 4 + row
                             val eventsInBucket = buckets[index]
                             val intensity = eventsInBucket.size
-
-                            val selected = selectedIndex == index
-
-                            val color =
-                                when {
-                                    intensity > 5 -> Color(0xFF4CAF50)
-                                    intensity > 2 -> Color(0xFF81C784)
-                                    intensity > 0 -> Color(0xFFA5D6A7)
-                                    else -> MaterialTheme.colorScheme.outlineVariant.copy(.2f)
-                                }
-
-                            val animatedColor by animateColorAsState(
-                                if (selected) Color(0xFF2196F3) else color,
-                                label = ""
-                            )
-
+                            val color = when {
+                                intensity > 5 -> Color(0xFF4CAF50)
+                                intensity > 2 -> Color(0xFF81C784)
+                                intensity > 0 -> Color(0xFFA5D6A7)
+                                else -> MaterialTheme.colorScheme.outlineVariant.copy(.2f)
+                            }
                             Box(
                                 Modifier
-                                    .size(24.dp)
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .background(animatedColor)
-                                    .border(
-                                        if (selected) 2.dp else 0.dp,
-                                        MaterialTheme.colorScheme.primary,
-                                        RoundedCornerShape(6.dp)
-                                    )
-                                    .clickable {
-                                        selectedIndex =
-                                            if (selectedIndex == index) null
-                                            else index
-                                    }
+                                    .size(22.dp)
+                                    .clip(RoundedCornerShape(5.dp))
+                                    .background(color)
+                                    .clickable { selectedIndex = if (selectedIndex == index) null else index }
+                                    .border(if (selectedIndex == index) 2.dp else 0.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(5.dp))
                             )
                         }
                     }
                 }
             }
-
-            Spacer(Modifier.height(16.dp))
-
-            AnimatedContent(
-                targetState = selectedIndex,
-                transitionSpec = {
-                    fadeIn() togetherWith fadeOut()
-                },
-                label = "heatmapDetails"
-            ) { index ->
-
-                if (index == null) {
-
-                    Text(
-                        "Tap a cell to inspect sensor activity",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = Color.Gray
-                    )
-
-                } else {
-
+            
+            AnimatedVisibility(visible = selectedIndex != null) {
+                selectedIndex?.let { index ->
                     val bucketEvents = buckets[index]
-
-                    val bucketStart = now - (48 - index) * 3600000
-                    val bucketEnd = bucketStart + 3600000
-
                     val formatter = SimpleDateFormat("HH:mm", Locale.getDefault())
-
-                    val startText = formatter.format(Date(bucketStart))
-                    val endText = formatter.format(Date(bucketEnd))
-
-                    Column {
-
-                        Text(
-                            "$startText - $endText",
-                            fontWeight = FontWeight.Bold
-                        )
-
-                        Spacer(Modifier.height(6.dp))
-
-                        Text(
-                            "${bucketEvents.size} sensor events detected",
-                            color = MaterialTheme.colorScheme.primary
-                        )
-
-                        Spacer(Modifier.height(8.dp))
-
-                        bucketEvents.take(4).forEach {
-
-                            Text(
-                                "• ${it.packageName.split('.').last()} (${it.sensorType})",
-                                fontSize = 12.sp
-                            )
-                        }
-
-                        if (bucketEvents.size > 4) {
-
-                            Text(
-                                "+ ${bucketEvents.size - 4} more",
-                                fontSize = 12.sp,
-                                color = Color.Gray
-                            )
-                        }
+                    val time = formatter.format(Date(now - (48 - index) * 3600000))
+                    Column(Modifier.padding(top = 16.dp)) {
+                        Text("Activity at $time", fontWeight = FontWeight.Bold)
+                        Text("${bucketEvents.size} events detected", color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
                     }
                 }
             }
-
-            Spacer(Modifier.height(12.dp))
-
+            
+            if (selectedIndex == null) {
+                Spacer(Modifier.height(14.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Last 48 Hours history", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                    Text("Activity Intensity", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                }
+            }
         }
     }
 }
+
+@Composable
+fun RecentList(events: List<SensorEvent>) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        events.take(4).forEach { LogItemPremium(it) }
+    }
+}
+
 @Composable
 fun LogScreen(events: List<SensorEvent>) {
     Column(Modifier.fillMaxSize()) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(MaterialTheme.colorScheme.surfaceColorAtElevation(4.dp))
-
+                .padding(top = 56.dp, bottom = 16.dp, horizontal = 20.dp)
         ) {
-            Text("Activity Logs", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text("Activity Timeline", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         }
         
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(20.dp),
+            contentPadding = PaddingValues(20.dp, bottom = 20.dp, start = 20.dp, end = 20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             if (events.isEmpty()) {
-                item { Box(Modifier.fillParentMaxSize(), contentAlignment = Alignment.Center) { Text("No detections yet.", color = Color.Gray) } }
+                item { Box(Modifier.fillParentMaxSize(), contentAlignment = Alignment.Center) { Text("No logs found.", color = Color.Gray) } }
             }
             items(events.sortedByDescending { it.timestamp }) { event ->
                 LogItemPremium(event)
@@ -434,16 +392,17 @@ fun LogItemPremium(event: SensorEvent) {
         else -> Icons.Rounded.Sensors
     }
 
-    val riskColors = when {
-        event.riskScore > 0.7 -> Color(0xFFFFEBEE) to Color(0xFFC62828)
-        event.riskScore > 0.3 -> Color(0xFFFFF3E0) to Color(0xFFE65100)
-        else -> Color(0xFFE8F5E9) to Color(0xFF2E7D32)
+    // Assign light BG based on risk score (0.0 to 1.0)
+    val colorData = when {
+        event.riskScore > 0.7 -> Triple(Color(0xFFFFEBEE), Color(0xFFC62828), "CRITICAL")
+        event.riskScore > 0.3 -> Triple(Color(0xFFFFF3E0), Color(0xFFE65100), "WARNING")
+        else -> Triple(Color(0xFFE8F5E9), Color(0xFF2E7D32), "SAFE")
     }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(containerColor = riskColors.first)
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = colorData.first.copy(alpha = 0.85f))
     ) {
         Row(
             Modifier.padding(16.dp),
@@ -451,34 +410,33 @@ fun LogItemPremium(event: SensorEvent) {
         ) {
             Box(
                 Modifier
-                    .size(48.dp)
-                    .background(riskColors.second.copy(0.1f), CircleShape),
+                    .size(52.dp)
+                    .background(colorData.second.copy(0.15f), CircleShape),
                 contentAlignment = Alignment.Center
             ) {
-                Icon(sensorIcon, null, tint = riskColors.second, modifier = Modifier.size(24.dp))
+                Icon(sensorIcon, null, tint = colorData.second, modifier = Modifier.size(26.dp))
             }
             Spacer(Modifier.width(16.dp))
             Column(Modifier.weight(1f)) {
                 Text(
                     event.packageName.split(".").last().replaceFirstChar { it.uppercase() },
-                    fontWeight = FontWeight.Bold,
+                    fontWeight = FontWeight.ExtraBold,
                     color = Color.Black
                 )
                 Text(
-                    event.sensorType.replace("android:", "").uppercase(),
+                    event.sensorType.replace("android:", "").replace("_", " ").uppercase(),
                     fontSize = 10.sp,
-                    color = riskColors.second.copy(0.8f),
+                    color = colorData.second.copy(0.8f),
                     letterSpacing = 1.sp,
                     fontWeight = FontWeight.Bold
                 )
             }
             Box(
                 Modifier
-                    .background(riskColors.second.copy(0.15f), RoundedCornerShape(8.dp))
+                    .background(colorData.second.copy(0.2f), RoundedCornerShape(12.dp))
                     .padding(horizontal = 12.dp, vertical = 6.dp)
             ) {
-                val label = if(event.riskScore > 0.7) "CRITICAL" else if(event.riskScore > 0.3) "WARNING" else "SECURE"
-                Text(label, style = MaterialTheme.typography.labelSmall, color = riskColors.second, fontWeight = FontWeight.ExtraBold)
+                Text(colorData.third, style = MaterialTheme.typography.labelSmall, color = colorData.second, fontWeight = FontWeight.ExtraBold)
             }
         }
     }
@@ -487,7 +445,6 @@ fun LogItemPremium(event: SensorEvent) {
 @Composable
 fun StatsScreen(events: List<SensorEvent>) {
     var statFilter by remember { mutableIntStateOf(0) }
-    
     val cameraCount = events.count { it.sensorType.contains("camera", true) }
     val micCount = events.count { it.sensorType.contains("audio", true) || it.sensorType.contains("mic", true) }
     val locationCount = events.count { it.sensorType.contains("location", true) }
@@ -497,9 +454,9 @@ fun StatsScreen(events: List<SensorEvent>) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(MaterialTheme.colorScheme.surfaceColorAtElevation(4.dp))
+                .padding(top = 56.dp, bottom = 16.dp, horizontal = 20.dp)
         ) {
-            Text("Shield Analytics", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text("Insights & Analytics", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         }
 
         LazyColumn(
@@ -508,8 +465,8 @@ fun StatsScreen(events: List<SensorEvent>) {
         ) {
             item {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    PremiumFilterChip("By Sensor", statFilter == 0) { statFilter = 0 }
-                    PremiumFilterChip("Overall Trends", statFilter == 1) { statFilter = 1 }
+                    PremiumFilterChip("Hardware Distribution", statFilter == 0) { statFilter = 0 }
+                    PremiumFilterChip("Risk Breakdown", statFilter == 1) { statFilter = 1 }
                 }
             }
 
@@ -524,39 +481,42 @@ fun StatsScreen(events: List<SensorEvent>) {
                     if (filter == 0) {
                         Card(
                             Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(28.dp),
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(1.dp))
+                            shape = RoundedCornerShape(32.dp),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(1.dp).copy(alpha = 0.7f))
                         ) {
                             Column(Modifier.padding(24.dp)) {
-                                Text("Sensor Distribution", fontWeight = FontWeight.ExtraBold, style = MaterialTheme.typography.titleMedium)
+                                Text("Sensor Usage Overview", fontWeight = FontWeight.ExtraBold, style = MaterialTheme.typography.titleMedium)
                                 Spacer(Modifier.height(24.dp))
-                                
                                 AnimatedStatBar("Visual (Camera)", cameraCount, total, Color(0xFF2196F3))
                                 AnimatedStatBar("Aural (Mic)", micCount, total, Color(0xFFF44336))
                                 AnimatedStatBar("Geospatial (Loc)", locationCount, total, Color(0xFF4CAF50))
                             }
                         }
                     } else {
-                        val criticalCount = events.count { it.riskScore > 0.7 }
-                        val warningCount = events.count { it.riskScore in 0.3..0.7 }
-                        val safeCount = events.count { it.riskScore < 0.3 }
+                        val critical = events.count { it.riskScore > 0.7 }
+                        val warning = events.count { it.riskScore in 0.3..0.7 }
+                        val safe = events.count { it.riskScore < 0.3 }
                         
                         Card(
                             Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(28.dp),
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(1.dp))
+                            shape = RoundedCornerShape(32.dp),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(1.dp).copy(alpha = 0.7f))
                         ) {
                             Column(Modifier.padding(24.dp)) {
-                                Text("Risk Breakdown", fontWeight = FontWeight.ExtraBold, style = MaterialTheme.typography.titleMedium)
+                                Text("Threat Level Statistics", fontWeight = FontWeight.ExtraBold, style = MaterialTheme.typography.titleMedium)
                                 Spacer(Modifier.height(24.dp))
-                                
-                                AnimatedStatBar("Critical Leaks", criticalCount, events.size.coerceAtLeast(1), Color(0xFFC62828))
-                                AnimatedStatBar("Suspicious Access", warningCount, events.size.coerceAtLeast(1), Color(0xFFE65100))
-                                AnimatedStatBar("Verified Safe", safeCount, events.size.coerceAtLeast(1), Color(0xFF2E7D32))
+                                AnimatedStatBar("Critical Threats", critical, events.size.coerceAtLeast(1), Color(0xFFC62828))
+                                AnimatedStatBar("Moderate Warnings", warning, events.size.coerceAtLeast(1), Color(0xFFE65100))
+                                AnimatedStatBar("Safe Validations", safe, events.size.coerceAtLeast(1), Color(0xFF2E7D32))
                             }
                         }
                     }
                 }
+            }
+            
+            item {
+                SectionTitle("Security Grid")
+                HeatmapGrid(events)
             }
         }
     }
@@ -570,12 +530,12 @@ fun AnimatedStatBar(label: String, count: Int, total: Int, color: Color) {
     Column(Modifier.fillMaxWidth().padding(vertical = 10.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-            Text("$count logs", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.ExtraBold)
+            Text("$count incidents", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.ExtraBold)
         }
         Spacer(Modifier.height(10.dp))
         LinearProgressIndicator(
             progress = { animatedProgress },
-            modifier = Modifier.fillMaxWidth().height(12.dp).clip(CircleShape),
+            modifier = Modifier.fillMaxWidth().height(14.dp).clip(CircleShape),
             color = color,
             trackColor = color.copy(alpha = 0.1f),
             strokeCap = StrokeCap.Round
@@ -608,10 +568,10 @@ fun PremiumNavigationBar(selected: Int, onSelected: (Int) -> Unit) {
         tonalElevation = 0.dp
     ) {
         val items = listOf(
-            Icons.Rounded.Security to "Guardian",
-            Icons.Rounded.History to "Timeline",
+            Icons.Rounded.Security to "Shield",
+            Icons.Rounded.History to "Logs",
             Icons.Rounded.Analytics to "Insights",
-            Icons.Rounded.Tune to "Setup"
+            Icons.Rounded.Tune to "Config"
         )
         items.forEachIndexed { index, pair ->
             NavigationBarItem(
@@ -633,31 +593,8 @@ fun PremiumNavigationBar(selected: Int, onSelected: (Int) -> Unit) {
 }
 
 @Composable
-fun HeaderSection() {
-    Row(modifier = Modifier.fillMaxWidth().padding(top = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
-            Text("Privacy Guard", fontSize = 34.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-1.5).sp)
-            Text("Advanced Shield Enabled", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-        }
-        IconButton(
-            onClick = {}, 
-            modifier = Modifier.size(52.dp).background(MaterialTheme.colorScheme.surfaceVariant, CircleShape)
-        ) {
-            Icon(Icons.Rounded.Shield, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(28.dp))
-        }
-    }
-}
-
-@Composable
 fun SectionTitle(title: String) {
     Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold, modifier = Modifier.padding(bottom = 12.dp))
-}
-
-@Composable
-fun RecentList(events: List<SensorEvent>) {
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        events.take(3).forEach { LogItemPremium(it) }
-    }
 }
 
 @Composable
@@ -667,7 +604,7 @@ fun SettingsScreen() {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(MaterialTheme.colorScheme.surfaceColorAtElevation(4.dp))
+                .padding(top = 56.dp, bottom = 16.dp, horizontal = 20.dp)
         ) {
             Text("Configuration", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         }
@@ -694,7 +631,7 @@ fun SettingsCardPremium(title: String, subtitle: String, icon: ImageVector, onCl
     Card(
         modifier = Modifier.fillMaxWidth().clickable { onClick() },
         shape = RoundedCornerShape(24.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(1.dp)),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(1.dp).copy(alpha = 0.7f)),
         border = androidx.compose.foundation.BorderStroke(1.2.dp, MaterialTheme.colorScheme.outlineVariant.copy(0.4f))
     ) {
         Row(Modifier.padding(22.dp), verticalAlignment = Alignment.CenterVertically) {
