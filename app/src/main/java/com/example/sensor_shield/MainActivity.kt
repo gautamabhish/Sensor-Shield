@@ -16,6 +16,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -48,6 +49,7 @@ import com.example.sensor_shield.ui.SensorViewModel
 import com.example.sensor_shield.ui.theme.SensorShieldTheme
 import java.text.SimpleDateFormat
 import java.util.*
+import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -80,23 +82,23 @@ fun PermissionScreen(content: @Composable () -> Unit) {
         list.toTypedArray()
     }
 
-    var allGranted by remember {
-        mutableStateOf(
-            permissionsToRequest.all {
-                ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
-            } && hasUsageStatsPermission(context)
-        )
+    var hardwareGranted by remember {
+        mutableStateOf(permissionsToRequest.all {
+            ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
+        })
+    }
+    
+    var usageGranted by remember {
+        mutableStateOf(hasUsageStatsPermission(context))
     }
 
     val launcher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
-        if (result.values.all { it } && hasUsageStatsPermission(context)) {
-            allGranted = true
-        }
+        hardwareGranted = result.values.all { it }
     }
 
-    if (allGranted) {
+    if (hardwareGranted && usageGranted) {
         content()
     } else {
         Box(
@@ -128,19 +130,17 @@ fun PermissionScreen(content: @Composable () -> Unit) {
                 )
                 Spacer(Modifier.height(32.dp))
                 
-                if (permissionsToRequest.any { ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED }) {
+                if (!hardwareGranted) {
                     Button(
                         onClick = { launcher.launch(permissionsToRequest) },
                         modifier = Modifier.fillMaxWidth().height(56.dp)
                     ) {
                         Text("Grant Hardware Access")
                     }
-                } else if (!hasUsageStatsPermission(context)) {
+                } else if (!usageGranted) {
                     Button(
                         onClick = {
-                            context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS).apply {
-                                data = Uri.fromParts("package", context.packageName, null)
-                            })
+                            context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
                         },
                         modifier = Modifier.fillMaxWidth().height(56.dp)
                     ) {
@@ -155,15 +155,15 @@ fun PermissionScreen(content: @Composable () -> Unit) {
             }
         }
         
-        // Check periodically if usage access was granted
+        // Periodically check permissions to update UI state
         LaunchedEffect(Unit) {
             while (true) {
-                if (permissionsToRequest.all { ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED } && 
-                    hasUsageStatsPermission(context)) {
-                    allGranted = true
-                    break
+                hardwareGranted = permissionsToRequest.all {
+                    ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
                 }
-                kotlinx.coroutines.delay(1000)
+                usageGranted = hasUsageStatsPermission(context)
+                if (hardwareGranted && usageGranted) break
+                delay(1000)
             }
         }
     }
@@ -420,11 +420,15 @@ fun StatusTile(label: String, icon: ImageVector, active: Boolean, packageName: S
 @Composable
 fun HeatmapGrid(events: List<SensorEvent>) {
     val now = System.currentTimeMillis()
+    var selectedIndex by remember { mutableStateOf<Int?>(null) }
+    var isExpanded by remember { mutableStateOf(false) }
+
     val buckets = remember(events) {
         List(48) { index ->
             val start = now - (48 - index) * 3600000
             val end = start + 3600000
-            events.count { it.timestamp in start..end }
+            val bucketEvents = events.filter { it.timestamp in start..end }
+            BucketData(start = start, end = end, events = bucketEvents)
         }
     }
 
@@ -432,26 +436,81 @@ fun HeatmapGrid(events: List<SensorEvent>) {
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(24.dp),
         color = MaterialTheme.colorScheme.surface,
-        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
     ) {
         Column(Modifier.padding(20.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 repeat(12) { col ->
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         repeat(4) { row ->
-                            val count = buckets[col * 4 + row]
+                            val index = col * 4 + row
+                            val bucket = buckets[index]
+                            val count = bucket.events.size
                             val color = when {
                                 count > 5 -> MaterialTheme.colorScheme.error
                                 count > 2 -> Color(0xFFD29922)
                                 count > 0 -> MaterialTheme.colorScheme.primary
                                 else -> MaterialTheme.colorScheme.outlineVariant
                             }
-                            Box(Modifier.size(20.dp).clip(RoundedCornerShape(4.dp)).background(color))
+                            val isSelected = selectedIndex == index
+                            Box(
+                                Modifier.size(20.dp).clip(RoundedCornerShape(4.dp)).background(color)
+                                    .border(if (isSelected) 2.dp else 0.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(4.dp))
+                                    .clickable {
+                                        if (selectedIndex == index) {
+                                            selectedIndex = null
+                                            isExpanded = false
+                                        } else {
+                                            selectedIndex = index
+                                            isExpanded = false
+                                        }
+                                    }
+                            )
                         }
                     }
                 }
             }
+
             Spacer(Modifier.height(16.dp))
+
+            selectedIndex?.let { index ->
+                val bucket = buckets[index]
+                val formatter = SimpleDateFormat("HH:mm", Locale.getDefault())
+                val startTime = formatter.format(Date(bucket.start))
+                val endTime = formatter.format(Date(bucket.end))
+
+                Column {
+                    Text("$startTime - $endTime", fontWeight = FontWeight.Bold)
+                    Text("${bucket.events.size} sensor events", color = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.height(8.dp))
+
+                    val displayEvents = if (isExpanded) bucket.events else bucket.events.take(3)
+                    displayEvents.forEach {
+                        Text("• ${it.packageName.substringAfterLast(".")} (${it.sensorType})", style = MaterialTheme.typography.labelSmall)
+                    }
+
+                    if (bucket.events.size > 3 && !isExpanded) {
+                        Text(
+                            "+ ${bucket.events.size - 3} more",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.clickable { isExpanded = true }.padding(vertical = 4.dp),
+                            fontWeight = FontWeight.Bold
+                        )
+                    } else if (isExpanded) {
+                        Text(
+                            "Show less",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.clickable { isExpanded = false }.padding(vertical = 4.dp),
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text("Chronological Data", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -463,6 +522,12 @@ fun HeatmapGrid(events: List<SensorEvent>) {
         }
     }
 }
+
+data class BucketData(
+    val start: Long,
+    val end: Long,
+    val events: List<SensorEvent>
+)
 
 @Composable
 fun RecentList(events: List<SensorEvent>) {
@@ -491,6 +556,7 @@ fun LogScreen(events: List<SensorEvent>) {
 
 @Composable
 fun LogItem(event: SensorEvent) {
+    val context = LocalContext.current
     val color = when(event.riskCategory) {
         "CRITICAL" -> MaterialTheme.colorScheme.error
         "UNEXPECTED", "SUSPICIOUS" -> Color(0xFFD29922)
@@ -498,7 +564,12 @@ fun LogItem(event: SensorEvent) {
     }
     
     Surface(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().clickable {
+            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = Uri.fromParts("package", event.packageName, null)
+            }
+            context.startActivity(intent)
+        },
         shape = RoundedCornerShape(18.dp),
         color = MaterialTheme.colorScheme.surface,
         border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
