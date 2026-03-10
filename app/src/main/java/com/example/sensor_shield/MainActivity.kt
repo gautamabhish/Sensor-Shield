@@ -278,7 +278,7 @@ fun HeaderSection() {
                 letterSpacing = (-1).sp
             )
             Text(
-                "Secure Kernel 2.4.0 Active",
+                "Secure Kernel Active",
                 color = MaterialTheme.colorScheme.primary,
                 style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.Bold
