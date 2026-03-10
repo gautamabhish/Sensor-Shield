@@ -10,6 +10,11 @@ import android.os.Bundle
 import android.provider.Settings
 import android.util.Log
 import android.widget.Toast
+import com.example.sensor_shield.data.AppDatabase
+import com.example.sensor_shield.data.TrustedApp
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 class NotificationActionActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -54,6 +59,14 @@ class NotificationActionActivity : Activity() {
                 } catch (e: Exception) {
                     Log.e("SensorShield", "Failed to open settings: ${e.message}")
                 }
+            }
+            SensorMonitorService.ACTION_TRUST_APP -> {
+                Log.i("SensorShield", "Trusting app: $pkg")
+                CoroutineScope(Dispatchers.IO).launch {
+                    val db = AppDatabase.getDatabase(applicationContext)
+                    db.sensorDao().insertTrustedApp(TrustedApp(pkg))
+                }
+                Toast.makeText(this, "$pkg marked as trusted. Alerts disabled.", Toast.LENGTH_SHORT).show()
             }
         }
         

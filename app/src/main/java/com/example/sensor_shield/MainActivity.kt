@@ -42,6 +42,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.sensor_shield.data.SensorEvent
+import com.example.sensor_shield.data.TrustedApp
 import com.example.sensor_shield.service.SensorMonitorService
 import com.example.sensor_shield.ui.SensorViewModel
 import com.example.sensor_shield.ui.theme.SensorShieldTheme
@@ -66,12 +67,18 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun PermissionScreen(content: @Composable () -> Unit) {
     val context = LocalContext.current
-    val permissionsToRequest = arrayOf(
-        Manifest.permission.CAMERA,
-        Manifest.permission.RECORD_AUDIO,
-        Manifest.permission.ACCESS_FINE_LOCATION,
-        Manifest.permission.ACCESS_COARSE_LOCATION
-    )
+    val permissionsToRequest = remember {
+        val list = mutableListOf(
+            Manifest.permission.CAMERA,
+            Manifest.permission.RECORD_AUDIO,
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            list.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        list.toTypedArray()
+    }
 
     var allGranted by remember {
         mutableStateOf(
@@ -175,9 +182,9 @@ fun hasUsageStatsPermission(context: Context): Boolean {
 
 @Composable
 fun MainContainer(viewModel: SensorViewModel = viewModel()) {
-    val context = LocalContext.current
     var selectedTab by remember { mutableIntStateOf(0) }
     val events by viewModel.allEvents.collectAsState(initial = emptyList())
+    val trustedApps by viewModel.trustedApps.collectAsState(initial = emptyList())
     val privacyScore = viewModel.getPrivacyScore(events)
     val suspects = viewModel.getTopSuspects(events)
     val suspiciousCount = viewModel.getSuspiciousCount(events)
@@ -199,7 +206,7 @@ fun MainContainer(viewModel: SensorViewModel = viewModel()) {
                     0 -> Dashboard(events, privacyScore, suspiciousCount, suspects) { selectedTab = 1 }
                     1 -> LogScreen(events)
                     2 -> StatsScreen(events)
-                    3 -> SettingsScreen()
+                    3 -> SettingsScreen(trustedApps, { viewModel.untrustApp(it) })
                 }
             }
         }
@@ -387,21 +394,25 @@ fun StatusTile(label: String, icon: ImageVector, active: Boolean, packageName: S
             Icon(icon, null, tint = if (active) color else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
             Spacer(Modifier.height(8.dp))
             Text(label, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
-            
-            val statusText = if (active) {
-                packageName?.split(".")?.last()?.replaceFirstChar { it.uppercase() } ?: "SURVEILLANCE"
+            if (active && packageName != null) {
+                Text(
+                    packageName.split(".").last(),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = color,
+                    fontWeight = FontWeight.Black,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
             } else {
-                "SECURE"
+                Text(
+                    if (active) "ACTIVE" else "SECURE",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (active) color else MaterialTheme.colorScheme.tertiary,
+                    fontWeight = FontWeight.Black,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
-            
-            Text(
-                text = statusText,
-                fontSize = 8.sp,
-                color = if (active) color else MaterialTheme.colorScheme.tertiary,
-                fontWeight = FontWeight.Black,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
         }
     }
 }
@@ -567,24 +578,71 @@ fun AnalyticsBar(label: String, count: Int, total: Int, color: Color) {
 }
 
 @Composable
-fun SettingsScreen() {
+fun SettingsScreen(trustedApps: List<TrustedApp>, onUntrust: (String) -> Unit) {
     val context = LocalContext.current
-    Column(Modifier.fillMaxSize().padding(start = 20.dp, top = 24.dp, end = 20.dp, bottom = 24.dp)) {
-        SectionHeader("Governance", "System-level privacy control")
-        Spacer(Modifier.height(24.dp))
+    LazyColumn(Modifier.fillMaxSize().padding(start = 20.dp, top = 24.dp, end = 20.dp, bottom = 24.dp)) {
+        item {
+            SectionHeader("Governance", "System-level privacy control")
+            Spacer(Modifier.height(24.dp))
+        }
         
-        Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            GovernanceTile("Usage Statistics", "Access kernel-level activity logs", Icons.Rounded.Analytics) {
-                context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
-            }
-            GovernanceTile("Power Management", "Bypass battery restrictions for monitor", Icons.Rounded.BatteryChargingFull) {
-                context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
-            }
-            GovernanceTile("Alert Protocols", "Configure real-time threat alerts", Icons.Rounded.NotificationsActive) {
-                val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-                    putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                GovernanceTile("Usage Statistics", "Access kernel-level activity logs", Icons.Rounded.Analytics) {
+                    context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
                 }
-                context.startActivity(intent)
+                GovernanceTile("Power Management", "Bypass battery restrictions for monitor", Icons.Rounded.BatteryChargingFull) {
+                    context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                }
+                GovernanceTile("Alert Protocols", "Configure real-time threat alerts", Icons.Rounded.NotificationsActive) {
+                    val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                        putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                    }
+                    context.startActivity(intent)
+                }
+            }
+            Spacer(Modifier.height(32.dp))
+        }
+
+        item {
+            SectionHeader("Whitelist Authority", "Exempted applications")
+            Spacer(Modifier.height(16.dp))
+        }
+
+        if (trustedApps.isEmpty()) {
+            item {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(20.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(0.3f),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                ) {
+                    Text(
+                        "No apps currently exempted from monitoring.",
+                        modifier = Modifier.padding(20.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        } else {
+            items(trustedApps) { app ->
+                Surface(
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                    shape = RoundedCornerShape(20.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                ) {
+                    Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(app.packageName.split(".").last().replaceFirstChar { it.uppercase() }, fontWeight = FontWeight.Bold)
+                            Text(app.packageName, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        IconButton(onClick = { onUntrust(app.packageName) }) {
+                            Icon(Icons.Rounded.Delete, "Untrust", tint = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                }
             }
         }
     }

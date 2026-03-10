@@ -7,6 +7,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.hardware.camera2.CameraManager
 import android.media.AudioManager
@@ -32,13 +33,14 @@ class SensorMonitorService : Service() {
     companion object {
         const val ACTION_KILL_APP = "com.example.sensor_shield.ACTION_KILL_APP"
         const val ACTION_REVOKE_APP = "com.example.sensor_shield.ACTION_REVOKE_APP"
+        const val ACTION_TRUST_APP = "com.example.sensor_shield.ACTION_TRUST_APP"
         const val EXTRA_PACKAGE_NAME = "extra_package_name"
     }
 
     private val TAG = "SensorShield"
     private val channelId = "SensorMonitorChannel"
     private val alertChannelId = "SensorAlertChannel"
-    private val notificationId = 1
+    private val notificationId = 1001 // Unique ID for foreground service
 
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
@@ -49,14 +51,9 @@ class SensorMonitorService : Service() {
     private lateinit var appOpsManager: AppOpsManager
     private lateinit var activityManager: ActivityManager
 
-    /**
-     * AppOps listener (camera, mic, location)
-     * Detects real-time activation of sensors.
-     */
     private val opListener = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
         OnOpActiveChangedListener { op, _, packageName, active ->
             if (active) {
-                // If the package is GMS, it's often a proxy for another app
                 val pkg = if (packageName == "com.google.android.gms") getForegroundPackageName() else packageName
                 if (pkg != null && pkg != "unknown") {
                     Log.w(TAG, "Active Sensor Op: $op by $pkg")
@@ -78,12 +75,16 @@ class SensorMonitorService : Service() {
         activityManager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
 
         createNotificationChannels()
-        val notification = createNotification("Privacy Guard is monitoring sensors")
+        val notification = createNotification("Privacy Guard is active")
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(notificationId, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
-        } else {
-            startForeground(notificationId, notification)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(notificationId, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            } else {
+                startForeground(notificationId, notification)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start foreground service: ${e.message}")
         }
 
         setupMonitoring()
@@ -91,7 +92,6 @@ class SensorMonitorService : Service() {
     }
 
     private fun setupMonitoring() {
-        // 1. AppOps Monitoring
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && opListener != null) {
             val ops = arrayOf(
                 AppOpsManager.OPSTR_CAMERA,
@@ -112,7 +112,6 @@ class SensorMonitorService : Service() {
             }
         }
 
-        // 2. Camera Callback
         cameraManager.registerAvailabilityCallback(object : CameraManager.AvailabilityCallback() {
             override fun onCameraUnavailable(cameraId: String) {
                 val pkg = getForegroundPackageName()
@@ -120,7 +119,6 @@ class SensorMonitorService : Service() {
             }
         }, null)
 
-        // 3. Audio Recording Callback
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             audioManager.registerAudioRecordingCallback(object : AudioManager.AudioRecordingCallback() {
                 override fun onRecordingConfigChanged(configs: List<AudioRecordingConfiguration>) {
@@ -136,7 +134,6 @@ class SensorMonitorService : Service() {
     private fun startPollingLoop() {
         serviceScope.launch {
             while (isActive) {
-                // Polling fallback for location as it's often not "active" for long enough to trigger callbacks
                 checkLocationUsage()
                 delay(15000)
             }
@@ -148,7 +145,6 @@ class SensorMonitorService : Service() {
             val pkg = getForegroundPackageName()
             if (pkg == "unknown" || pkg == packageName) return
 
-            // Check if the foreground app is allowed to use location
             val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 appOpsManager.unsafeCheckOpNoThrow(AppOpsManager.OPSTR_FINE_LOCATION, android.os.Process.myUid(), pkg)
             } else {
@@ -168,13 +164,19 @@ class SensorMonitorService : Service() {
         val isScreenOn = powerManager.isInteractive
         val foregroundPkg = getForegroundPackageName()
         val isForeground = (packageName == foregroundPkg)
+        val installSource = getInstallSource(packageName)
 
-        val risk = RiskEngine.calculateRisk(packageName, op, isForeground, isScreenOn)
+        val risk = RiskEngine.calculateRisk(packageName, op, isForeground, isScreenOn, installSource)
 
         serviceScope.launch {
             try {
                 val db = AppDatabase.getDatabase(applicationContext)
-                // Deduplicate: Don't log same sensor for same app within 20 seconds
+                
+                if (db.sensorDao().isTrusted(packageName)) {
+                    Log.i(TAG, "SKIP: $packageName is trusted.")
+                    return@launch
+                }
+
                 val recentCount = db.sensorDao().getRecentCount(packageName, op, System.currentTimeMillis() - 20000)
                 
                 if (recentCount == 0) {
@@ -188,7 +190,6 @@ class SensorMonitorService : Service() {
                             isAnomalous = risk.isAnomalous
                         )
                     )
-                    Log.i(TAG, "LOGGED: $packageName used $op (Risk: ${risk.score}, Category: ${risk.category})")
                     
                     if (risk.category != AccessCategory.EXPECTED) {
                         showRiskNotification(packageName, op, risk)
@@ -197,6 +198,19 @@ class SensorMonitorService : Service() {
             } catch (e: Exception) {
                 Log.e(TAG, "Database error: ${e.message}")
             }
+        }
+    }
+
+    private fun getInstallSource(packageName: String): String? {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                packageManager.getInstallSourceInfo(packageName).installingPackageName
+            } else {
+                @Suppress("DEPRECATION")
+                packageManager.getInstallerPackageName(packageName)
+            }
+        } catch (e: Exception) {
+            null
         }
     }
 
@@ -210,7 +224,6 @@ class SensorMonitorService : Service() {
             else -> "🔍 Suspicious Activity" to NotificationCompat.PRIORITY_DEFAULT
         }
 
-        // Kill Intent - using NotificationActionActivity to ensure it works from background
         val killIntent = Intent(this, NotificationActionActivity::class.java).apply {
             action = ACTION_KILL_APP
             putExtra(EXTRA_PACKAGE_NAME, packageName)
@@ -220,14 +233,13 @@ class SensorMonitorService : Service() {
             this, packageName.hashCode() + 1, killIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        // Revoke Intent
-        val revokeIntent = Intent(this, NotificationActionActivity::class.java).apply {
-            action = ACTION_REVOKE_APP
+        val trustIntent = Intent(this, NotificationActionActivity::class.java).apply {
+            action = ACTION_TRUST_APP
             putExtra(EXTRA_PACKAGE_NAME, packageName)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
         }
-        val revokePendingIntent = PendingIntent.getActivity(
-            this, packageName.hashCode() + 2, revokeIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        val trustPendingIntent = PendingIntent.getActivity(
+            this, packageName.hashCode() + 2, trustIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
         val notification = NotificationCompat.Builder(this, alertChannelId)
@@ -238,7 +250,7 @@ class SensorMonitorService : Service() {
             .setCategory(NotificationCompat.CATEGORY_ALARM)
             .setAutoCancel(true)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Kill App", killPendingIntent)
-            .addAction(android.R.drawable.ic_menu_manage, "Revoke", revokePendingIntent)
+            .addAction(android.R.drawable.ic_menu_save, "Trust (No Alert)", trustPendingIntent)
             .build()
         
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -255,7 +267,9 @@ class SensorMonitorService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val manager = getSystemService(NotificationManager::class.java)
             
-            val monitorChannel = NotificationChannel(channelId, "Sensor Monitoring", NotificationManager.IMPORTANCE_LOW)
+            val monitorChannel = NotificationChannel(channelId, "Sensor Monitoring Status", NotificationManager.IMPORTANCE_LOW).apply {
+                description = "Shows that the privacy guard is active in the background"
+            }
             manager.createNotificationChannel(monitorChannel)
 
             val alertChannel = NotificationChannel(alertChannelId, "Privacy Alerts", NotificationManager.IMPORTANCE_HIGH).apply {
@@ -263,6 +277,7 @@ class SensorMonitorService : Service() {
                 enableLights(true)
                 lightColor = android.graphics.Color.RED
                 enableVibration(true)
+                setBypassDnd(true)
             }
             manager.createNotificationChannel(alertChannel)
         }
@@ -272,10 +287,12 @@ class SensorMonitorService : Service() {
         val intent = Intent(this, MainActivity::class.java)
         val pendingIntent = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
         return NotificationCompat.Builder(this, channelId)
-            .setContentTitle("Sensor Shield")
+            .setContentTitle("Sensor Shield Active")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_lock_idle_lock)
             .setContentIntent(pendingIntent)
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
     }
 
