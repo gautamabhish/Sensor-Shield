@@ -1,0 +1,14 @@
+package com.example.sensor_shield.data
+
+data class AppBehaviorProfile(
+    val packageName: String,
+    val cameraCount: Int,
+    val micCount: Int,
+    val locationCount: Int,
+    val backgroundCount: Int,
+    val screenOffCount: Int = 0,
+    val multiSensorCount: Int = 0,
+    val uploadSpikes: Int = 0,
+    val totalBytesUploaded: Long = 0,
+    val lastRiskCategory: String = "EXPECTED"
+)

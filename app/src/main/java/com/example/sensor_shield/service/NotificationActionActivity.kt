@@ -51,15 +51,7 @@ class NotificationActionActivity : Activity() {
                     Log.e("SensorShield", "Failed to open settings: ${e.message}")
                 }
             }
-            SensorMonitorService.ACTION_REVOKE_APP -> {
-                Log.w("SensorShield", "Revoke action requested for: $pkg")
-                try {
-                    startActivity(settingsIntent)
-                    Toast.makeText(this, "Go to 'Permissions' to revoke access for $pkg", Toast.LENGTH_LONG).show()
-                } catch (e: Exception) {
-                    Log.e("SensorShield", "Failed to open settings: ${e.message}")
-                }
-            }
+
             SensorMonitorService.ACTION_TRUST_APP -> {
                 Log.i("SensorShield", "Trusting app: $pkg")
                 CoroutineScope(Dispatchers.IO).launch {

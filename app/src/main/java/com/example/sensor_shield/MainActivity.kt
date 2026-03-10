@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -25,6 +26,7 @@ import androidx.compose.foundation.lazy.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.ListAlt
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
@@ -42,6 +44,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.sensor_shield.data.AppBehaviorProfile
 import com.example.sensor_shield.data.SensorEvent
 import com.example.sensor_shield.data.TrustedApp
 import com.example.sensor_shield.service.SensorMonitorService
@@ -155,7 +158,6 @@ fun PermissionScreen(content: @Composable () -> Unit) {
             }
         }
         
-        // Periodically check permissions to update UI state
         LaunchedEffect(Unit) {
             while (true) {
                 hardwareGranted = permissionsToRequest.all {
@@ -205,8 +207,8 @@ fun MainContainer(viewModel: SensorViewModel = viewModel()) {
                 when (tab) {
                     0 -> Dashboard(events, privacyScore, suspiciousCount, suspects) { selectedTab = 1 }
                     1 -> LogScreen(events)
-                    2 -> StatsScreen(events)
-                    3 -> SettingsScreen(trustedApps, { viewModel.untrustApp(it) })
+                    2 -> BehaviorAnalysisScreen(viewModel.buildBehaviorProfiles(events), events)
+                    3 -> SettingsScreen(trustedApps) { viewModel.untrustApp(it) }
                 }
             }
         }
@@ -288,7 +290,7 @@ fun HeaderSection() {
             modifier = Modifier.size(48.dp),
             shape = RoundedCornerShape(14.dp),
             color = MaterialTheme.colorScheme.surfaceVariant,
-            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
         ) {
             Box(contentAlignment = Alignment.Center) {
                 Icon(Icons.Rounded.Security, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp))
@@ -303,7 +305,7 @@ fun MainScoreCard(score: Int, suspiciousCount: Int) {
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(28.dp),
         color = MaterialTheme.colorScheme.surface,
-        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
     ) {
         Row(
             modifier = Modifier.padding(24.dp),
@@ -351,7 +353,7 @@ fun SuspectsCard(suspects: List<Pair<String, Int>>) {
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(24.dp),
         color = MaterialTheme.colorScheme.surface,
-        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
     ) {
         Column(Modifier.padding(16.dp)) {
             suspects.forEachIndexed { index, (pkg, count) ->
@@ -385,7 +387,7 @@ fun StatusTile(label: String, icon: ImageVector, active: Boolean, packageName: S
         modifier = modifier,
         shape = RoundedCornerShape(20.dp),
         color = if (active) color.copy(0.1f) else MaterialTheme.colorScheme.surface,
-        border = androidx.compose.foundation.BorderStroke(1.dp, if (active) color.copy(0.5f) else MaterialTheme.colorScheme.outlineVariant)
+        border = BorderStroke(1.dp, if (active) color.copy(0.5f) else MaterialTheme.colorScheme.outlineVariant)
     ) {
         Column(
             Modifier.padding(16.dp),
@@ -508,17 +510,6 @@ fun HeatmapGrid(events: List<SensorEvent>) {
                     }
                 }
             }
-
-            Spacer(Modifier.height(16.dp))
-
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("Chronological Data", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.size(8.dp).clip(CircleShape).background(MaterialTheme.colorScheme.error))
-                    Spacer(Modifier.width(4.dp))
-                    Text("Critical", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
         }
     }
 }
@@ -572,7 +563,7 @@ fun LogItem(event: SensorEvent) {
         },
         shape = RoundedCornerShape(18.dp),
         color = MaterialTheme.colorScheme.surface,
-        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
     ) {
         Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(40.dp).background(color.copy(0.1f), CircleShape), contentAlignment = Alignment.Center) {
@@ -605,27 +596,318 @@ fun LogItem(event: SensorEvent) {
 }
 
 @Composable
-fun StatsScreen(events: List<SensorEvent>) {
-    Column(Modifier.fillMaxSize().padding(start = 20.dp, top = 24.dp, end = 20.dp, bottom = 24.dp)) {
-        SectionHeader("Threat Analytics", "Vector distribution analysis")
-        Spacer(Modifier.height(24.dp))
-        
-        val camera = events.count { it.sensorType.contains("camera") }
-        val mic = events.count { it.sensorType.contains("audio") || it.sensorType.contains("mic") }
-        val loc = events.count { it.sensorType.contains("location") }
-        val total = (camera + mic + loc).coerceAtLeast(1)
+fun BehaviorAnalysisScreen(profiles: List<AppBehaviorProfile>, events: List<SensorEvent>) {
+    var searchQuery by remember { mutableStateOf("") }
+    var filter by remember { mutableStateOf("ALL") }
+    var selectedPackage by remember { mutableStateOf<String?>(null) }
 
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(24.dp),
-            color = MaterialTheme.colorScheme.surface,
-            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
-        ) {
-            Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
-                AnalyticsBar("Visual Access", camera, total, MaterialTheme.colorScheme.primary)
-                AnalyticsBar("Acoustic Access", mic, total, MaterialTheme.colorScheme.error)
-                AnalyticsBar("Geospatial Access", loc, total, MaterialTheme.colorScheme.tertiary)
+    if (selectedPackage != null) {
+        val profile = profiles.find { it.packageName == selectedPackage }
+        val appEvents = events.filter { it.packageName == selectedPackage }
+        if (profile != null) {
+            AppBehaviorDetailScreen(profile, appEvents) { selectedPackage = null }
+        } else {
+            selectedPackage = null
+        }
+        return
+    }
+
+    val filteredProfiles = profiles.filter { profile ->
+        val risk = when {
+            profile.lastRiskCategory == "CRITICAL" || profile.uploadSpikes > 0 -> "CRITICAL"
+            profile.backgroundCount > 3 -> "HIGH"
+            else -> "LOW"
+        }
+        val matchesFilter = filter == "ALL" || (filter == risk)
+        val matchesSearch = profile.packageName.contains(searchQuery, ignoreCase = true)
+        matchesFilter && matchesSearch
+    }
+
+    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        Column(Modifier.padding(start = 20.dp, top = 24.dp, end = 20.dp)) {
+            SectionHeader("Behavior Analysis", "App profiling and pattern detection")
+            
+            Spacer(Modifier.height(16.dp))
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = { searchQuery = it },
+                modifier = Modifier.fillMaxWidth(),
+                placeholder = { Text("Search application") },
+                leadingIcon = { Icon(Icons.Rounded.Search, null) },
+                shape = RoundedCornerShape(14.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
+                    focusedBorderColor = MaterialTheme.colorScheme.primary
+                )
+            )
+            
+            Spacer(Modifier.height(12.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("ALL", "CRITICAL", "HIGH", "LOW").forEach { type ->
+                    FilterChip(
+                        selected = filter == type,
+                        onClick = { filter = type },
+                        label = { Text(type, fontSize = 12.sp) },
+                        shape = RoundedCornerShape(12.dp)
+                    )
+                }
             }
+            Spacer(Modifier.height(12.dp))
+        }
+
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            items(filteredProfiles) { profile ->
+                BehaviorProfileCard(profile) { selectedPackage = profile.packageName }
+            }
+        }
+    }
+}
+
+@Composable
+fun AppBehaviorDetailScreen(profile: AppBehaviorProfile, events: List<SensorEvent>, onBack: () -> Unit) {
+    val context = LocalContext.current
+    BackHandler { onBack() }
+
+    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Rounded.ArrowBack, null)
+            }
+            Spacer(Modifier.width(8.dp))
+            Column {
+                Text(profile.packageName.split(".").last().replaceFirstChar { it.uppercase() }, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleLarge)
+                Text(profile.packageName, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 32.dp),
+            verticalArrangement = Arrangement.spacedBy(24.dp)
+        ) {
+            item {
+                SectionHeader("Vector Distribution", "Overall sensor access counts")
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(24.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                ) {
+                    Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
+                        val total = (profile.cameraCount + profile.micCount + profile.locationCount).coerceAtLeast(1)
+                        AnalyticsBar("Visual Access", profile.cameraCount, total, MaterialTheme.colorScheme.primary)
+                        AnalyticsBar("Acoustic Access", profile.micCount, total, MaterialTheme.colorScheme.error)
+                        AnalyticsBar("Geospatial Access", profile.locationCount, total, MaterialTheme.colorScheme.tertiary)
+                    }
+                }
+            }
+
+            item {
+                SectionHeader("Temporal Analysis", "Sensor activity over time (Last 24h)")
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(24.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                ) {
+                    TimeSeriesGraph(events)
+                }
+            }
+
+            item {
+                SectionHeader("Pattern Detection", "Identified behavioral anomalies")
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(24.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                ) {
+                    Column(Modifier.padding(20.dp)) {
+                        if (profile.screenOffCount > 0) PatternAlert("Screen-Off Surveillance", "${profile.screenOffCount} events recorded while screen inactive")
+                        if (profile.uploadSpikes > 0) PatternAlert("Data Exfiltration", "${profile.uploadSpikes} network spikes correlated with sensor use")
+                        if (profile.multiSensorCount > 0) PatternAlert("Multi-Sensor Correlation", "${profile.multiSensorCount} instances of simultaneous sensor access")
+                        if (profile.backgroundCount > 3) PatternAlert("Persistent Background Access", "Frequent sensor polling while not in foreground")
+                        
+                        if (profile.screenOffCount == 0 && profile.uploadSpikes == 0 && profile.multiSensorCount == 0 && profile.backgroundCount <= 3) {
+                            Text("No major suspicious patterns detected.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+            }
+
+            item {
+                Button(
+                    onClick = {
+                        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                            data = Uri.fromParts("package", profile.packageName, null)
+                        }
+                        context.startActivity(intent)
+                    },
+                    modifier = Modifier.fillMaxWidth().height(56.dp),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Icon(Icons.Rounded.Settings, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Modify System Permissions")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun TimeSeriesGraph(events: List<SensorEvent>) {
+    val now = System.currentTimeMillis()
+    val last24h = now - 24 * 3600000
+    val eventsLast24h = events.filter { it.timestamp > last24h }
+    
+    val cameraBuckets = IntArray(24)
+    val micBuckets = IntArray(24)
+    val locBuckets = IntArray(24)
+
+    eventsLast24h.forEach {
+        val hourAgo = ((now - it.timestamp) / 3600000).toInt()
+        if (hourAgo in 0..23) {
+            val bucketIdx = 23 - hourAgo
+            when {
+                it.sensorType.contains("camera", true) -> cameraBuckets[bucketIdx]++
+                it.sensorType.contains("audio", true) || it.sensorType.contains("mic", true) -> micBuckets[bucketIdx]++
+                it.sensorType.contains("location", true) -> locBuckets[bucketIdx]++
+            }
+        }
+    }
+    
+    val max = (0..23).maxOf { (cameraBuckets[it] + micBuckets[it] + locBuckets[it]) }.coerceAtLeast(1)
+
+    Column(Modifier.padding(20.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth().height(150.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.Bottom
+        ) {
+            for (i in 0..23) {
+                val cam = cameraBuckets[i]
+                val mic = micBuckets[i]
+                val loc = locBuckets[i]
+                val total = cam + mic + loc
+                
+                Column(Modifier.weight(1f).fillMaxHeight()) {
+                    Spacer(Modifier.weight(1f))
+                    if (total > 0) {
+                        if (loc > 0) Box(Modifier.fillMaxWidth().weight(loc.toFloat() / max).background(MaterialTheme.colorScheme.tertiary))
+                        if (mic > 0) Box(Modifier.fillMaxWidth().weight(mic.toFloat() / max).background(MaterialTheme.colorScheme.error))
+                        if (cam > 0) Box(Modifier.fillMaxWidth().weight(cam.toFloat() / max).background(MaterialTheme.colorScheme.primary))
+                    } else {
+                        Box(Modifier.fillMaxWidth().height(2.dp).background(MaterialTheme.colorScheme.outlineVariant))
+                    }
+                }
+            }
+        }
+        
+        Spacer(Modifier.height(12.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+            LegendItem("Camera", MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.width(16.dp))
+            LegendItem("Mic", MaterialTheme.colorScheme.error)
+            Spacer(Modifier.width(16.dp))
+            LegendItem("Location", MaterialTheme.colorScheme.tertiary)
+        }
+    }
+}
+
+@Composable
+fun LegendItem(label: String, color: Color) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(8.dp).clip(CircleShape).background(color))
+        Spacer(Modifier.width(4.dp))
+        Text(label, style = MaterialTheme.typography.labelSmall)
+    }
+}
+
+@Composable
+fun BehaviorProfileCard(profile: AppBehaviorProfile, onClick: () -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxWidth().clickable { onClick() },
+        shape = RoundedCornerShape(24.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+    ) {
+        Column(Modifier.padding(20.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(40.dp).background(MaterialTheme.colorScheme.primary.copy(0.1f), RoundedCornerShape(12.dp)), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Rounded.Analytics, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                }
+                Spacer(Modifier.width(16.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(profile.packageName.split(".").last().replaceFirstChar { it.uppercase() }, fontWeight = FontWeight.Bold)
+                    Text(profile.packageName, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                val risk = if (profile.lastRiskCategory == "CRITICAL" || profile.uploadSpikes > 0) "CRITICAL" else if (profile.backgroundCount > 3) "HIGH" else "LOW"
+                Text(risk, color = if (risk == "CRITICAL") MaterialTheme.colorScheme.error else if (risk == "HIGH") Color(0xFFD29922) else MaterialTheme.colorScheme.tertiary, fontWeight = FontWeight.Black, fontSize = 12.sp)
+            }
+            
+            Spacer(Modifier.height(20.dp))
+            
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                BehaviorStat("Camera", profile.cameraCount, Icons.Rounded.CameraAlt)
+                BehaviorStat("Mic", profile.micCount, Icons.Rounded.Mic)
+                BehaviorStat("Loc", profile.locationCount, Icons.Rounded.LocationOn)
+                BehaviorStat("Bkg", profile.backgroundCount, Icons.Rounded.History)
+            }
+            
+            if (profile.screenOffCount > 0 || profile.uploadSpikes > 0 || profile.multiSensorCount > 0) {
+                Spacer(Modifier.height(16.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Spacer(Modifier.height(16.dp))
+                
+                if (profile.screenOffCount > 0) {
+                    PatternAlert("Screen-Off Surveillance", "Sensors accessed while screen was inactive")
+                }
+                if (profile.uploadSpikes > 0) {
+                    PatternAlert("Data Exfiltration", "High network upload correlated with sensor use")
+                }
+                if (profile.multiSensorCount > 0) {
+                    PatternAlert("Multi-Sensor Correlation", "Different sensors used within short window")
+                }
+            }
+            
+            if (profile.totalBytesUploaded > 0) {
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    "Total Data Correlated: ${profile.totalBytesUploaded / 1024} KB",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun BehaviorStat(label: String, count: Int, icon: ImageVector) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Icon(icon, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
+        Text("$count", fontWeight = FontWeight.Black, fontSize = 14.sp)
+        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+fun PatternAlert(title: String, desc: String) {
+    Row(verticalAlignment = Alignment.Top, modifier = Modifier.padding(vertical = 4.dp)) {
+        Icon(Icons.Rounded.Warning, null, tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(14.dp).padding(top = 2.dp))
+        Spacer(Modifier.width(8.dp))
+        Column {
+            Text(title, color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+            Text(desc, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
@@ -666,10 +948,12 @@ fun SettingsScreen(trustedApps: List<TrustedApp>, onUntrust: (String) -> Unit) {
                     context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
                 }
                 GovernanceTile("Alert Protocols", "Configure real-time threat alerts", Icons.Rounded.NotificationsActive) {
-                    val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-                        putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                            putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                        }
+                        context.startActivity(intent)
                     }
-                    context.startActivity(intent)
                 }
             }
             Spacer(Modifier.height(32.dp))
@@ -686,7 +970,7 @@ fun SettingsScreen(trustedApps: List<TrustedApp>, onUntrust: (String) -> Unit) {
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(20.dp),
                     color = MaterialTheme.colorScheme.surfaceVariant.copy(0.3f),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
                 ) {
                     Text(
                         "No apps currently exempted from monitoring.",
@@ -702,7 +986,7 @@ fun SettingsScreen(trustedApps: List<TrustedApp>, onUntrust: (String) -> Unit) {
                     modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
                     shape = RoundedCornerShape(20.dp),
                     color = MaterialTheme.colorScheme.surface,
-                    border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
                 ) {
                     Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
@@ -725,7 +1009,7 @@ fun GovernanceTile(title: String, desc: String, icon: ImageVector, onClick: () -
         modifier = Modifier.fillMaxWidth().clickable { onClick() },
         shape = RoundedCornerShape(20.dp),
         color = MaterialTheme.colorScheme.surface,
-        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
     ) {
         Row(Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(44.dp).background(MaterialTheme.colorScheme.primary.copy(0.1f), RoundedCornerShape(12.dp)), contentAlignment = Alignment.Center) {
@@ -751,7 +1035,7 @@ fun IndustryNavigationBar(selected: Int, onSelected: (Int) -> Unit) {
         val items = listOf(
             Triple(Icons.Rounded.Dashboard, "Console", 0),
             Triple(Icons.AutoMirrored.Rounded.ListAlt, "Ledger", 1),
-            Triple(Icons.Rounded.PieChart, "Analytics", 2),
+            Triple(Icons.Rounded.PieChart, "Behavior", 2),
             Triple(Icons.Rounded.AdminPanelSettings, "Admin", 3)
         )
         items.forEach { (icon, label, index) ->

@@ -12,5 +12,7 @@ data class SensorEvent(
     val isForeground: Boolean,
     val riskScore: Double,
     val riskCategory: String = "EXPECTED",
-    val isAnomalous: Boolean = false
+    val isAnomalous: Boolean = false,
+    val isScreenOff: Boolean = false,
+    val bytesUploaded: Long = 0
 )
