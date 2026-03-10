@@ -1,9 +1,11 @@
 package com.example.sensor_shield
 
 import android.Manifest
+import android.app.AppOpsManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -22,15 +24,13 @@ import androidx.compose.foundation.lazy.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ListAlt
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -53,10 +53,110 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             SensorShieldTheme {
-                MainContainer()
+                PermissionGate {
+                    MainContainer()
+                }
             }
         }
     }
+}
+
+@Composable
+fun PermissionGate(content: @Composable () -> Unit) {
+    val context = LocalContext.current
+    val permissionsToRequest = mutableListOf(
+        Manifest.permission.CAMERA,
+        Manifest.permission.RECORD_AUDIO,
+        Manifest.permission.ACCESS_FINE_LOCATION,
+        Manifest.permission.ACCESS_COARSE_LOCATION
+    ).apply {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    var allGranted by remember { 
+        mutableStateOf(permissionsToRequest.all { 
+            ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED 
+        } && hasUsageStatsPermission(context)) 
+    }
+
+    val launcher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        if (results.all { it.value } && hasUsageStatsPermission(context)) {
+            allGranted = true
+        }
+    }
+
+    if (allGranted) {
+        LaunchedEffect(Unit) { startMonitor(context) }
+        content()
+    } else {
+        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).padding(24.dp), contentAlignment = Alignment.Center) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(Icons.Rounded.Lock, null, modifier = Modifier.size(64.dp), tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.height(24.dp))
+                Text("Permissions Required", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                Text("To protect your privacy, Sensor Shield needs access to monitor hardware activity and usage statistics.", 
+                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                Spacer(Modifier.height(32.dp))
+                
+                Button(
+                    onClick = { launcher.launch(permissionsToRequest.toTypedArray()) },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text("Grant Sensor Permissions")
+                }
+                
+                Spacer(Modifier.height(12.dp))
+                
+                if (!hasUsageStatsPermission(context)) {
+                    OutlinedButton(
+                        onClick = { 
+                            context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS).apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            })
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text("Grant Usage Access")
+                    }
+                }
+
+                Spacer(Modifier.height(24.dp))
+                TextButton(onClick = { (context as? ComponentActivity)?.finish() }) {
+                    Text("Exit Application", color = MaterialTheme.colorScheme.error)
+                }
+            }
+        }
+        
+        // Check periodically if usage access was granted
+        LaunchedEffect(Unit) {
+            while (true) {
+                if (permissionsToRequest.all { ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED } && 
+                    hasUsageStatsPermission(context)) {
+                    allGranted = true
+                    break
+                }
+                kotlinx.coroutines.delay(1000)
+            }
+        }
+    }
+}
+
+fun hasUsageStatsPermission(context: Context): Boolean {
+    val appOps = context.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+    val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        appOps.unsafeCheckOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, android.os.Process.myUid(), context.packageName)
+    } else {
+        @Suppress("DEPRECATION")
+        appOps.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, android.os.Process.myUid(), context.packageName)
+    }
+    return mode == AppOpsManager.MODE_ALLOWED
 }
 
 @Composable
@@ -65,43 +165,26 @@ fun MainContainer(viewModel: SensorViewModel = viewModel()) {
     var selectedTab by remember { mutableIntStateOf(0) }
     val events by viewModel.allEvents.collectAsState(initial = emptyList())
     val privacyScore = viewModel.getPrivacyScore(events)
+    val suspects = viewModel.getTopSuspects(events)
 
-    val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { isGranted -> if (isGranted) startMonitor(context) }
-
-    LaunchedEffect(Unit) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-            } else { startMonitor(context) }
-        } else { startMonitor(context) }
-    }
-
-    Box(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
-        PremiumBackground()
-        
-        Scaffold(
-            containerColor = Color.Transparent,
-            bottomBar = {
-                PremiumNavigationBar(selectedTab) { selectedTab = it }
-            }
-        ) { padding ->
-            Box(modifier = Modifier.padding(padding)) {
-                AnimatedContent(
-                    targetState = selectedTab,
-                    transitionSpec = {
-                        val direction = if (targetState > initialState) 1 else -1
-                        (fadeIn(tween(500)) + slideInHorizontally(tween(500)) { it * direction })
-                            .togetherWith(fadeOut(tween(400)) + slideOutHorizontally(tween(400)) { -it * direction })
-                    }, label = "TabSwitch"
-                ) { tab ->
-                    when (tab) {
-                        0 -> Dashboard(events, privacyScore) { selectedTab = 1 }
-                        1 -> LogScreen(events)
-                        2 -> StatsScreen(events)
-                        3 -> SettingsScreen()
-                    }
+    Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
+        bottomBar = {
+            IndustryNavigationBar(selectedTab) { selectedTab = it }
+        }
+    ) { padding ->
+        Box(modifier = Modifier.padding(padding).fillMaxSize()) {
+            AnimatedContent(
+                targetState = selectedTab,
+                transitionSpec = {
+                    fadeIn(tween(300)).togetherWith(fadeOut(tween(300)))
+                }, label = "TabSwitch"
+            ) { tab ->
+                when (tab) {
+                    0 -> Dashboard(events, privacyScore, suspects) { selectedTab = 1 }
+                    1 -> LogScreen(events)
+                    2 -> StatsScreen(events)
+                    3 -> SettingsScreen()
                 }
             }
         }
@@ -109,69 +192,45 @@ fun MainContainer(viewModel: SensorViewModel = viewModel()) {
 }
 
 @Composable
-fun PremiumBackground() {
-    val infiniteTransition = rememberInfiniteTransition(label = "bg")
-    val offsetX by infiniteTransition.animateFloat(
-        initialValue = -100f,
-        targetValue = 100f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(15000, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse
-        ), label = "x"
-    )
-    val offsetY by infiniteTransition.animateFloat(
-        initialValue = -50f,
-        targetValue = 50f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(12000, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse
-        ), label = "y"
-    )
-
-    Box(modifier = Modifier.fillMaxSize()) {
-        Box(
-            modifier = Modifier
-                .size(450.dp)
-                .offset(x = (-150).dp + offsetX.dp, y = (-100).dp + offsetY.dp)
-                .blur(120.dp)
-                .background(MaterialTheme.colorScheme.primary.copy(0.12f), CircleShape)
-        )
-        Box(
-            modifier = Modifier
-                .size(350.dp)
-                .align(Alignment.BottomEnd)
-                .offset(x = 100.dp - offsetX.dp, y = 100.dp - offsetY.dp)
-                .blur(120.dp)
-                .background(MaterialTheme.colorScheme.secondary.copy(0.1f), CircleShape)
-        )
-    }
-}
-
-@Composable
-fun Dashboard(events: List<SensorEvent>, score: Int, onSeeAll: () -> Unit) {
+fun Dashboard(events: List<SensorEvent>, score: Int, suspects: List<Pair<String, Int>>, onSeeAll: () -> Unit) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(20.dp),
-        verticalArrangement = Arrangement.spacedBy(24.dp)
+        contentPadding = PaddingValues(top = 24.dp, start = 20.dp, end = 20.dp, bottom = 32.dp),
+        verticalArrangement = Arrangement.spacedBy(28.dp)
     ) {
         item { HeaderSection() }
-        item { ScoreCard(score, events.size) }
-        item {
-            SectionTitle("Shield Status")
-            LiveIndicators(events)
+        item { MainScoreCard(score, events.size) }
+        
+        if (suspects.isNotEmpty()) {
+            item {
+                SectionHeader("Vulnerability Audit", "High risk applications")
+                SuspectsCard(suspects)
+            }
         }
+
         item {
-            SectionTitle("Activity Grid")
+            SectionHeader("Active Surveillance", "Real-time hardware status")
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                val recent = events.filter { it.timestamp > System.currentTimeMillis() - 15000 }
+                StatusTile("Visual", Icons.Rounded.CameraAlt, recent.any { it.sensorType.contains("camera", true) }, Modifier.weight(1f))
+                StatusTile("Acoustic", Icons.Rounded.Mic, recent.any { it.sensorType.contains("audio", true) || it.sensorType.contains("mic", true) }, Modifier.weight(1f))
+                StatusTile("Geospatial", Icons.Rounded.LocationOn, recent.any { it.sensorType.contains("location", true) }, Modifier.weight(1f))
+            }
+        }
+
+        item {
+            SectionHeader("Incidence Timeline", "Last 48 hours activity")
             HeatmapGrid(events)
         }
+
         item {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                SectionTitle("Recent Detections")
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Bottom) {
+                SectionHeader("Security Ledger", "Recent access attempts")
                 Text(
-                    "View All",
+                    "View Logs",
                     color = MaterialTheme.colorScheme.primary,
                     style = MaterialTheme.typography.labelLarge,
-                    modifier = Modifier.clickable { onSeeAll() }.padding(bottom = 12.dp)
+                    modifier = Modifier.clickable { onSeeAll() }.padding(bottom = 8.dp)
                 )
             }
             RecentList(events)
@@ -181,169 +240,180 @@ fun Dashboard(events: List<SensorEvent>, score: Int, onSeeAll: () -> Unit) {
 
 @Composable
 fun HeaderSection() {
-    Row(modifier = Modifier.fillMaxWidth().padding(top = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
         Column(Modifier.weight(1f)) {
-            Text("Privacy Shield", fontSize = 34.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-1.5).sp)
-            Text("Active Protection Enabled", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+            Text(
+                "Shield Enterprise",
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Black,
+                letterSpacing = (-1).sp
+            )
+            Text(
+                "Secure Kernel 2.4.0 Active",
+                color = MaterialTheme.colorScheme.primary,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold
+            )
         }
-        IconButton(
-            onClick = {},
-            modifier = Modifier.size(52.dp).background(MaterialTheme.colorScheme.surfaceVariant.copy(0.5f), CircleShape)
+        Surface(
+            modifier = Modifier.size(48.dp),
+            shape = RoundedCornerShape(14.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
         ) {
-            Icon(Icons.Rounded.Security, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(28.dp))
+            Box(contentAlignment = Alignment.Center) {
+                Icon(Icons.Rounded.Security, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp))
+            }
         }
     }
 }
 
 @Composable
-fun ScoreCard(score: Int, eventCount: Int) {
-    val animatedScore by animateFloatAsState(
-        targetValue = score.toFloat(),
-        animationSpec = tween(2000, easing = FastOutSlowInEasing),
-        label = "score"
-    )
-
-    Card(
+fun MainScoreCard(score: Int, totalEvents: Int) {
+    Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(32.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(2.dp).copy(alpha = 0.7f))
+        shape = RoundedCornerShape(28.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
     ) {
         Row(
             modifier = Modifier.padding(24.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(contentAlignment = Alignment.Center, modifier = Modifier.size(110.dp)) {
+            Box(contentAlignment = Alignment.Center, modifier = Modifier.size(90.dp)) {
                 CircularProgressIndicator(
                     progress = { 1f },
                     modifier = Modifier.fillMaxSize(),
-                    strokeWidth = 12.dp,
-                    strokeCap = StrokeCap.Round,
-                    color = MaterialTheme.colorScheme.outlineVariant.copy(0.3f)
+                    strokeWidth = 8.dp,
+                    color = MaterialTheme.colorScheme.outlineVariant,
+                    strokeCap = StrokeCap.Round
                 )
                 CircularProgressIndicator(
-                    progress = { animatedScore / 100f },
+                    progress = { score / 100f },
                     modifier = Modifier.fillMaxSize(),
-                    strokeWidth = 12.dp,
-                    strokeCap = StrokeCap.Round,
-                    color = if (score > 75) Color(0xFF4CAF50) else if (score > 40) Color(0xFFFFA000) else Color(0xFFF44336)
+                    strokeWidth = 8.dp,
+                    color = if (score > 80) MaterialTheme.colorScheme.tertiary else if (score > 50) Color(0xFFD29922) else MaterialTheme.colorScheme.error,
+                    strokeCap = StrokeCap.Round
                 )
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("${animatedScore.toInt()}%", fontWeight = FontWeight.ExtraBold, fontSize = 26.sp)
-                    Text("Secure", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
-                }
+                Text("${score}%", fontWeight = FontWeight.Black, fontSize = 22.sp)
             }
             Spacer(Modifier.width(24.dp))
             Column {
-                Text("Defense Status", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text("Integrity Score", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                 Text(
-                    if (score > 75) "Optimal Protection" else if (score > 40) "Moderate Risk" else "Highly Vulnerable",
-                    color = if (score > 75) Color(0xFF4CAF50) else if (score > 40) Color(0xFFFFA000) else Color(0xFFF44336),
-                    style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = FontWeight.SemiBold
+                    if (score > 80) "Environment Secure" else "Breach Detected",
+                    color = if (score > 80) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodyMedium
                 )
-                Spacer(Modifier.height(4.dp))
-                Text("$eventCount logs analyzed", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "$totalEvents suspicious patterns analyzed",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     }
 }
 
 @Composable
-fun LiveIndicators(events: List<SensorEvent>) {
-    val recent = events.filter { it.timestamp > System.currentTimeMillis() - 20000 }
-
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-        SensorBlob("Camera", Icons.Rounded.CameraAlt, recent.any { it.sensorType.contains("camera", true) })
-        SensorBlob("Mic", Icons.Rounded.Mic, recent.any { it.sensorType.contains("audio", true) || it.sensorType.contains("mic", true) })
-        SensorBlob("Location", Icons.Rounded.LocationOn, recent.any { it.sensorType.contains("location", true) })
+fun SuspectsCard(suspects: List<Pair<String, Int>>) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            suspects.forEachIndexed { index, (pkg, count) ->
+                Row(
+                    Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        Modifier.size(32.dp).background(MaterialTheme.colorScheme.error.copy(0.1f), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("${index + 1}", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                    Spacer(Modifier.width(16.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(pkg.split(".").last().replaceFirstChar { it.uppercase() }, fontWeight = FontWeight.Bold, maxLines = 1)
+                        Text(pkg, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                    }
+                    Text("$count", fontWeight = FontWeight.Black, color = MaterialTheme.colorScheme.error)
+                }
+                if (index < suspects.size - 1) HorizontalDivider(Modifier.padding(vertical = 4.dp), color = MaterialTheme.colorScheme.outlineVariant)
+            }
+        }
     }
 }
 
 @Composable
-fun SensorBlob(label: String, icon: ImageVector, active: Boolean) {
-    val color = if (active) Color(0xFFF44336) else MaterialTheme.colorScheme.primary.copy(0.4f)
-    val scale by animateFloatAsState(if (active) 1.25f else 1f, spring(Spring.DampingRatioHighBouncy), label = "")
-
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Box(
-            modifier = Modifier
-                .size(76.dp)
-                .scale(scale)
-                .background(color.copy(0.05f), CircleShape)
-                .border(1.5.dp, color.copy(0.3f), CircleShape),
-            contentAlignment = Alignment.Center
+fun StatusTile(label: String, icon: ImageVector, active: Boolean, modifier: Modifier) {
+    val color = if (active) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(20.dp),
+        color = if (active) color.copy(0.1f) else MaterialTheme.colorScheme.surface,
+        border = androidx.compose.foundation.BorderStroke(1.dp, if (active) color.copy(0.5f) else MaterialTheme.colorScheme.outlineVariant)
+    ) {
+        Column(
+            Modifier.padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            if (active) {
-                Box(Modifier.size(58.dp).background(color.copy(0.1f), CircleShape))
-            }
-            Icon(icon, null, tint = if (active) Color(0xFFF44336) else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(28.dp))
+            Icon(icon, null, tint = if (active) color else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
+            Spacer(Modifier.height(8.dp))
+            Text(label, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+            Text(if (active) "SURVEILLANCE" else "SECURE", fontSize = 8.sp, color = if (active) color else MaterialTheme.colorScheme.tertiary, fontWeight = FontWeight.Black)
         }
-        Spacer(Modifier.height(8.dp))
-        Text(label, style = MaterialTheme.typography.labelMedium, fontWeight = if (active) FontWeight.ExtraBold else FontWeight.Medium)
     }
 }
 
 @Composable
 fun HeatmapGrid(events: List<SensorEvent>) {
     val now = System.currentTimeMillis()
-    var selectedIndex by remember { mutableStateOf<Int?>(null) }
     val buckets = remember(events) {
         List(48) { index ->
             val start = now - (48 - index) * 3600000
             val end = start + 3600000
-            events.filter { it.timestamp in start..end }
+            events.count { it.timestamp in start..end }
         }
     }
 
-    Card(
-        Modifier.fillMaxWidth(),
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(24.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(1.dp).copy(alpha = 0.7f))
+        color = MaterialTheme.colorScheme.surface,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
     ) {
         Column(Modifier.padding(20.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 repeat(12) { col ->
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         repeat(4) { row ->
-                            val index = col * 4 + row
-                            val eventsInBucket = buckets[index]
-                            val intensity = eventsInBucket.size
+                            val count = buckets[col * 4 + row]
                             val color = when {
-                                intensity > 5 -> Color(0xFF4CAF50)
-                                intensity > 2 -> Color(0xFF81C784)
-                                intensity > 0 -> Color(0xFFA5D6A7)
-                                else -> MaterialTheme.colorScheme.outlineVariant.copy(.2f)
+                                count > 5 -> MaterialTheme.colorScheme.error
+                                count > 2 -> Color(0xFFD29922)
+                                count > 0 -> MaterialTheme.colorScheme.primary
+                                else -> MaterialTheme.colorScheme.outlineVariant
                             }
-                            Box(
-                                Modifier
-                                    .size(22.dp)
-                                    .clip(RoundedCornerShape(5.dp))
-                                    .background(color)
-                                    .clickable { selectedIndex = if (selectedIndex == index) null else index }
-                                    .border(if (selectedIndex == index) 2.dp else 0.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(5.dp))
-                            )
+                            Box(Modifier.size(20.dp).clip(RoundedCornerShape(4.dp)).background(color))
                         }
                     }
                 }
             }
-            
-            AnimatedVisibility(visible = selectedIndex != null) {
-                selectedIndex?.let { index ->
-                    val bucketEvents = buckets[index]
-                    val formatter = SimpleDateFormat("HH:mm", Locale.getDefault())
-                    val time = formatter.format(Date(now - (48 - index) * 3600000))
-                    Column(Modifier.padding(top = 16.dp)) {
-                        Text("Activity at $time", fontWeight = FontWeight.Bold)
-                        Text("${bucketEvents.size} events detected", color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
-                    }
-                }
-            }
-            
-            if (selectedIndex == null) {
-                Spacer(Modifier.height(14.dp))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("Last 48 Hours history", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
-                    Text("Activity Intensity", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+            Spacer(Modifier.height(16.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("Chronological Data", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(8.dp).clip(CircleShape).background(MaterialTheme.colorScheme.error))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Critical", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
@@ -353,90 +423,67 @@ fun HeatmapGrid(events: List<SensorEvent>) {
 @Composable
 fun RecentList(events: List<SensorEvent>) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        events.take(4).forEach { LogItemPremium(it) }
+        events.take(4).forEach { event ->
+            LogItem(event)
+        }
     }
 }
 
 @Composable
 fun LogScreen(events: List<SensorEvent>) {
-    Column(Modifier.fillMaxSize()) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 56.dp, bottom = 16.dp, horizontal = 20.dp)
-        ) {
-            Text("Activity Timeline", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        Box(Modifier.fillMaxWidth().padding(start = 20.dp, top = 24.dp, end = 20.dp, bottom = 24.dp)) {
+            SectionHeader("Audit Trail", "Comprehensive security ledger")
         }
-        
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(20.dp, bottom = 20.dp, start = 20.dp, end = 20.dp),
+            contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            if (events.isEmpty()) {
-                item { Box(Modifier.fillParentMaxSize(), contentAlignment = Alignment.Center) { Text("No logs found.", color = Color.Gray) } }
-            }
-            items(events.sortedByDescending { it.timestamp }) { event ->
-                LogItemPremium(event)
-            }
+            items(events.sortedByDescending { it.timestamp }) { LogItem(it) }
         }
     }
 }
 
 @Composable
-fun LogItemPremium(event: SensorEvent) {
-    val sensorIcon = when {
-        event.sensorType.contains("camera", true) -> Icons.Rounded.CameraAlt
-        event.sensorType.contains("audio", true) || event.sensorType.contains("mic", true) -> Icons.Rounded.Mic
-        event.sensorType.contains("location", true) -> Icons.Rounded.LocationOn
-        else -> Icons.Rounded.Sensors
+fun LogItem(event: SensorEvent) {
+    val color = when(event.riskCategory) {
+        "CRITICAL" -> MaterialTheme.colorScheme.error
+        "UNEXPECTED", "SUSPICIOUS" -> Color(0xFFD29922)
+        else -> MaterialTheme.colorScheme.tertiary
     }
-
-    // Assign light BG based on risk score (0.0 to 1.0)
-    val colorData = when {
-        event.riskScore > 0.7 -> Triple(Color(0xFFFFEBEE), Color(0xFFC62828), "CRITICAL")
-        event.riskScore > 0.3 -> Triple(Color(0xFFFFF3E0), Color(0xFFE65100), "WARNING")
-        else -> Triple(Color(0xFFE8F5E9), Color(0xFF2E7D32), "SAFE")
-    }
-
-    Card(
+    
+    Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(24.dp),
-        colors = CardDefaults.cardColors(containerColor = colorData.first.copy(alpha = 0.85f))
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
     ) {
-        Row(
-            Modifier.padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                Modifier
-                    .size(52.dp)
-                    .background(colorData.second.copy(0.15f), CircleShape),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(sensorIcon, null, tint = colorData.second, modifier = Modifier.size(26.dp))
+        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(40.dp).background(color.copy(0.1f), CircleShape), contentAlignment = Alignment.Center) {
+                val icon = when {
+                    event.sensorType.contains("camera") -> Icons.Rounded.CameraAlt
+                    event.sensorType.contains("audio") || event.sensorType.contains("mic") -> Icons.Rounded.Mic
+                    else -> Icons.Rounded.LocationOn
+                }
+                Icon(icon, null, tint = color, modifier = Modifier.size(18.dp))
             }
             Spacer(Modifier.width(16.dp))
             Column(Modifier.weight(1f)) {
+                Text(event.packageName.split(".").last(), fontWeight = FontWeight.Bold)
                 Text(
-                    event.packageName.split(".").last().replaceFirstChar { it.uppercase() },
-                    fontWeight = FontWeight.ExtraBold,
-                    color = Color.Black
-                )
-                Text(
-                    event.sensorType.replace("android:", "").replace("_", " ").uppercase(),
-                    fontSize = 10.sp,
-                    color = colorData.second.copy(0.8f),
-                    letterSpacing = 1.sp,
-                    fontWeight = FontWeight.Bold
+                    "${if(event.isForeground) "Foreground" else "Background"} process",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            Box(
-                Modifier
-                    .background(colorData.second.copy(0.2f), RoundedCornerShape(12.dp))
-                    .padding(horizontal = 12.dp, vertical = 6.dp)
-            ) {
-                Text(colorData.third, style = MaterialTheme.typography.labelSmall, color = colorData.second, fontWeight = FontWeight.ExtraBold)
+            Column(horizontalAlignment = Alignment.End) {
+                Text(event.riskCategory, color = color, fontWeight = FontWeight.Black, fontSize = 10.sp)
+                Text(
+                    SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(event.timestamp)),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     }
@@ -444,179 +491,63 @@ fun LogItemPremium(event: SensorEvent) {
 
 @Composable
 fun StatsScreen(events: List<SensorEvent>) {
-    var statFilter by remember { mutableIntStateOf(0) }
-    val cameraCount = events.count { it.sensorType.contains("camera", true) }
-    val micCount = events.count { it.sensorType.contains("audio", true) || it.sensorType.contains("mic", true) }
-    val locationCount = events.count { it.sensorType.contains("location", true) }
-    val total = (cameraCount + micCount + locationCount).coerceAtLeast(1)
+    Column(Modifier.fillMaxSize().padding(start = 20.dp, top = 24.dp, end = 20.dp, bottom = 24.dp)) {
+        SectionHeader("Threat Analytics", "Vector distribution analysis")
+        Spacer(Modifier.height(24.dp))
+        
+        val camera = events.count { it.sensorType.contains("camera") }
+        val mic = events.count { it.sensorType.contains("audio") || it.sensorType.contains("mic") }
+        val loc = events.count { it.sensorType.contains("location") }
+        val total = (camera + mic + loc).coerceAtLeast(1)
 
-    Column(Modifier.fillMaxSize()) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 56.dp, bottom = 16.dp, horizontal = 20.dp)
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(24.dp),
+            color = MaterialTheme.colorScheme.surface,
+            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
         ) {
-            Text("Insights & Analytics", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-        }
-
-        LazyColumn(
-            contentPadding = PaddingValues(20.dp),
-            verticalArrangement = Arrangement.spacedBy(24.dp)
-        ) {
-            item {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    PremiumFilterChip("Hardware Distribution", statFilter == 0) { statFilter = 0 }
-                    PremiumFilterChip("Risk Breakdown", statFilter == 1) { statFilter = 1 }
-                }
-            }
-
-            item {
-                AnimatedContent(
-                    targetState = statFilter,
-                    transitionSpec = {
-                        (fadeIn(tween(400)) + slideInVertically(tween(400)) { it / 2 })
-                            .togetherWith(fadeOut(tween(300)))
-                    }, label = "StatAnim"
-                ) { filter ->
-                    if (filter == 0) {
-                        Card(
-                            Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(32.dp),
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(1.dp).copy(alpha = 0.7f))
-                        ) {
-                            Column(Modifier.padding(24.dp)) {
-                                Text("Sensor Usage Overview", fontWeight = FontWeight.ExtraBold, style = MaterialTheme.typography.titleMedium)
-                                Spacer(Modifier.height(24.dp))
-                                AnimatedStatBar("Visual (Camera)", cameraCount, total, Color(0xFF2196F3))
-                                AnimatedStatBar("Aural (Mic)", micCount, total, Color(0xFFF44336))
-                                AnimatedStatBar("Geospatial (Loc)", locationCount, total, Color(0xFF4CAF50))
-                            }
-                        }
-                    } else {
-                        val critical = events.count { it.riskScore > 0.7 }
-                        val warning = events.count { it.riskScore in 0.3..0.7 }
-                        val safe = events.count { it.riskScore < 0.3 }
-                        
-                        Card(
-                            Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(32.dp),
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(1.dp).copy(alpha = 0.7f))
-                        ) {
-                            Column(Modifier.padding(24.dp)) {
-                                Text("Threat Level Statistics", fontWeight = FontWeight.ExtraBold, style = MaterialTheme.typography.titleMedium)
-                                Spacer(Modifier.height(24.dp))
-                                AnimatedStatBar("Critical Threats", critical, events.size.coerceAtLeast(1), Color(0xFFC62828))
-                                AnimatedStatBar("Moderate Warnings", warning, events.size.coerceAtLeast(1), Color(0xFFE65100))
-                                AnimatedStatBar("Safe Validations", safe, events.size.coerceAtLeast(1), Color(0xFF2E7D32))
-                            }
-                        }
-                    }
-                }
-            }
-            
-            item {
-                SectionTitle("Security Grid")
-                HeatmapGrid(events)
+            Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
+                AnalyticsBar("Visual Access", camera, total, MaterialTheme.colorScheme.primary)
+                AnalyticsBar("Acoustic Access", mic, total, MaterialTheme.colorScheme.error)
+                AnalyticsBar("Geospatial Access", loc, total, MaterialTheme.colorScheme.tertiary)
             }
         }
     }
 }
 
 @Composable
-fun AnimatedStatBar(label: String, count: Int, total: Int, color: Color) {
-    val progress = count.toFloat() / total
-    val animatedProgress by animateFloatAsState(progress, tween(1200, easing = FastOutSlowInEasing), label = "")
-
-    Column(Modifier.fillMaxWidth().padding(vertical = 10.dp)) {
+fun AnalyticsBar(label: String, count: Int, total: Int, color: Color) {
+    Column {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-            Text("$count incidents", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.ExtraBold)
+            Text(label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+            Text("$count events", style = MaterialTheme.typography.labelSmall, color = color, fontWeight = FontWeight.Black)
         }
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(8.dp))
         LinearProgressIndicator(
-            progress = { animatedProgress },
-            modifier = Modifier.fillMaxWidth().height(14.dp).clip(CircleShape),
+            progress = { count.toFloat() / total },
+            modifier = Modifier.fillMaxWidth().height(8.dp).clip(CircleShape),
             color = color,
-            trackColor = color.copy(alpha = 0.1f),
+            trackColor = MaterialTheme.colorScheme.outlineVariant,
             strokeCap = StrokeCap.Round
         )
     }
 }
 
 @Composable
-fun PremiumFilterChip(label: String, selected: Boolean, onClick: () -> Unit) {
-    val bgColor by animateColorAsState(if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant.copy(0.5f), label = "")
-    val contentColor by animateColorAsState(if (selected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant, label = "")
-
-    Surface(
-        onClick = onClick,
-        color = bgColor,
-        shape = RoundedCornerShape(16.dp),
-        modifier = Modifier.height(44.dp).animateContentSize()
-    ) {
-        Box(Modifier.padding(horizontal = 20.dp), contentAlignment = Alignment.Center) {
-            Text(label, color = contentColor, fontWeight = FontWeight.ExtraBold, fontSize = 14.sp)
-        }
-    }
-}
-
-@Composable
-fun PremiumNavigationBar(selected: Int, onSelected: (Int) -> Unit) {
-    NavigationBar(
-        modifier = Modifier.clip(RoundedCornerShape(topStart = 32.dp, topEnd = 32.dp)),
-        containerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(12.dp).copy(0.96f),
-        tonalElevation = 0.dp
-    ) {
-        val items = listOf(
-            Icons.Rounded.Security to "Shield",
-            Icons.Rounded.History to "Logs",
-            Icons.Rounded.Analytics to "Insights",
-            Icons.Rounded.Tune to "Config"
-        )
-        items.forEachIndexed { index, pair ->
-            NavigationBarItem(
-                selected = selected == index,
-                onClick = { onSelected(index) },
-                icon = { 
-                    val scale by animateFloatAsState(if (selected == index) 1.3f else 1f, label = "")
-                    Icon(pair.first, null, modifier = Modifier.scale(scale)) 
-                },
-                label = { Text(pair.second, fontWeight = if(selected == index) FontWeight.ExtraBold else FontWeight.Medium) },
-                colors = NavigationBarItemDefaults.colors(
-                    selectedIconColor = MaterialTheme.colorScheme.primary,
-                    selectedTextColor = MaterialTheme.colorScheme.primary,
-                    indicatorColor = MaterialTheme.colorScheme.primaryContainer.copy(0.5f)
-                )
-            )
-        }
-    }
-}
-
-@Composable
-fun SectionTitle(title: String) {
-    Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold, modifier = Modifier.padding(bottom = 12.dp))
-}
-
-@Composable
 fun SettingsScreen() {
     val context = LocalContext.current
-    Column(Modifier.fillMaxSize()) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 56.dp, bottom = 16.dp, horizontal = 20.dp)
-        ) {
-            Text("Configuration", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-        }
+    Column(Modifier.fillMaxSize().padding(start = 20.dp, top = 24.dp, end = 20.dp, bottom = 24.dp)) {
+        SectionHeader("Governance", "System-level privacy control")
+        Spacer(Modifier.height(24.dp))
         
-        Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            SettingsCardPremium("Privacy Analytics", "Detect hidden sensor leakages in real-time", Icons.Rounded.LockOpen) {
+        Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            GovernanceTile("Usage Statistics", "Access kernel-level activity logs", Icons.Rounded.Analytics) {
                 context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
             }
-            SettingsCardPremium("Shield Persistence", "Keep the monitor active even in standby", Icons.Rounded.Bolt) {
+            GovernanceTile("Power Management", "Bypass battery restrictions for monitor", Icons.Rounded.BatteryChargingFull) {
                 context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
             }
-            SettingsCardPremium("Alert System", "Configure real-time interception alerts", Icons.Rounded.NotificationsActive) {
+            GovernanceTile("Alert Protocols", "Configure real-time threat alerts", Icons.Rounded.NotificationsActive) {
                 val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
                     putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
                 }
@@ -627,25 +558,61 @@ fun SettingsScreen() {
 }
 
 @Composable
-fun SettingsCardPremium(title: String, subtitle: String, icon: ImageVector, onClick: () -> Unit) {
-    Card(
+fun GovernanceTile(title: String, desc: String, icon: ImageVector, onClick: () -> Unit) {
+    Surface(
         modifier = Modifier.fillMaxWidth().clickable { onClick() },
-        shape = RoundedCornerShape(24.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(1.dp).copy(alpha = 0.7f)),
-        border = androidx.compose.foundation.BorderStroke(1.2.dp, MaterialTheme.colorScheme.outlineVariant.copy(0.4f))
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
     ) {
-        Row(Modifier.padding(22.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(52.dp).background(MaterialTheme.colorScheme.primary.copy(0.1f), CircleShape), contentAlignment = Alignment.Center) {
-                Icon(icon, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(26.dp))
+        Row(Modifier.padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(44.dp).background(MaterialTheme.colorScheme.primary.copy(0.1f), RoundedCornerShape(12.dp)), contentAlignment = Alignment.Center) {
+                Icon(icon, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(22.dp))
             }
-            Spacer(Modifier.width(20.dp))
-            Column {
-                Text(title, fontWeight = FontWeight.ExtraBold, style = MaterialTheme.typography.bodyLarge)
-                Text(subtitle, fontSize = 12.sp, color = Color.Gray)
+            Spacer(Modifier.width(16.dp))
+            Column(Modifier.weight(1f)) {
+                Text(title, fontWeight = FontWeight.Bold)
+                Text(desc, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Spacer(Modifier.weight(1f))
             Icon(Icons.Rounded.ChevronRight, null, tint = MaterialTheme.colorScheme.outline)
         }
+    }
+}
+
+@Composable
+fun IndustryNavigationBar(selected: Int, onSelected: (Int) -> Unit) {
+    NavigationBar(
+        containerColor = MaterialTheme.colorScheme.surface,
+        tonalElevation = 0.dp,
+        modifier = Modifier.border(0.5.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
+    ) {
+        val items = listOf(
+            Triple(Icons.Rounded.Dashboard, "Console", 0),
+            Triple(Icons.AutoMirrored.Rounded.ListAlt, "Ledger", 1),
+            Triple(Icons.Rounded.PieChart, "Analytics", 2),
+            Triple(Icons.Rounded.AdminPanelSettings, "Admin", 3)
+        )
+        items.forEach { (icon, label, index) ->
+            NavigationBarItem(
+                selected = selected == index,
+                onClick = { onSelected(index) },
+                icon = { Icon(icon, null) },
+                label = { Text(label, fontWeight = FontWeight.Bold, fontSize = 10.sp) },
+                colors = NavigationBarItemDefaults.colors(
+                    selectedIconColor = MaterialTheme.colorScheme.primary,
+                    indicatorColor = Color.Transparent,
+                    unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(0.6f)
+                )
+            )
+        }
+    }
+}
+
+@Composable
+fun SectionHeader(title: String, subtitle: String) {
+    Column(Modifier.padding(bottom = 8.dp)) {
+        Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black)
+        Text(subtitle, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.Bold)
     }
 }
 

@@ -7,6 +7,7 @@ import com.example.sensor_shield.data.AppDatabase
 import com.example.sensor_shield.data.SensorEvent
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 
 class SensorViewModel(application: Application) : AndroidViewModel(application) {
@@ -22,5 +23,14 @@ class SensorViewModel(application: Application) : AndroidViewModel(application) 
         if (events.isEmpty()) return 100
         val avgRisk = events.map { it.riskScore }.average()
         return (100 - (avgRisk * 100)).toInt().coerceIn(0, 100)
+    }
+
+    fun getTopSuspects(events: List<SensorEvent>): List<Pair<String, Int>> {
+        return events.filter { it.riskScore > 0.4 }
+            .groupBy { it.packageName }
+            .mapValues { it.value.size }
+            .toList()
+            .sortedByDescending { it.second }
+            .take(3)
     }
 }

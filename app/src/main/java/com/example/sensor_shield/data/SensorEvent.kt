@@ -11,5 +11,6 @@ data class SensorEvent(
     val timestamp: Long = System.currentTimeMillis(),
     val isForeground: Boolean,
     val riskScore: Double,
+    val riskCategory: String = "EXPECTED",
     val isAnomalous: Boolean = false
 )

@@ -3,28 +3,40 @@ package com.example.sensor_shield.service
 import android.app.*
 import android.app.AppOpsManager.OnOpActiveChangedListener
 import android.app.usage.UsageStatsManager
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.hardware.camera2.CameraManager
 import android.media.AudioManager
 import android.media.AudioRecordingConfiguration
+import android.net.Uri
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.provider.Settings
 import android.util.Log
+import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.example.sensor_shield.MainActivity
 import com.example.sensor_shield.data.AppDatabase
 import com.example.sensor_shield.data.SensorEvent
 import com.example.sensor_shield.engine.RiskEngine
+import com.example.sensor_shield.engine.AccessCategory
 import kotlinx.coroutines.*
 
 class SensorMonitorService : Service() {
 
+    companion object {
+        private const val ACTION_KILL_APP = "com.example.sensor_shield.ACTION_KILL_APP"
+        private const val EXTRA_PACKAGE_NAME = "extra_package_name"
+    }
+
     private val TAG = "SensorShield"
     private val channelId = "SensorMonitorChannel"
+    private val alertChannelId = "SensorAlertChannel"
     private val notificationId = 1
 
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -34,6 +46,47 @@ class SensorMonitorService : Service() {
     private lateinit var audioManager: AudioManager
     private lateinit var cameraManager: CameraManager
     private lateinit var appOpsManager: AppOpsManager
+    private lateinit var activityManager: ActivityManager
+
+    private val killReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == ACTION_KILL_APP) {
+                val pkg = intent.getStringExtra(EXTRA_PACKAGE_NAME)
+                if (pkg != null) {
+                    Log.w(TAG, "Kill command received for: $pkg")
+                    
+                    // 1. Force dismiss the notification
+                    val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                    notificationManager.cancel(pkg.hashCode())
+
+                    // 2. Try to kill background processes
+                    try {
+                        activityManager.killBackgroundProcesses(pkg)
+                        Log.d(TAG, "killBackgroundProcesses called for $pkg")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error killing processes: ${e.message}")
+                    }
+
+                    // 3. Open App Info settings for manual "Force Stop"
+                    // This is the ONLY reliable way on modern Android for non-system apps
+                    try {
+                        val settingsIntent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                            data = Uri.fromParts("package", pkg, null)
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                            addFlags(Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS)
+                        }
+                        context?.startActivity(settingsIntent)
+                        
+                        Toast.makeText(context, "Tap 'FORCE STOP' to terminate $pkg immediately", Toast.LENGTH_LONG).show()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error opening settings: ${e.message}")
+                        Toast.makeText(context, "Could not open settings for $pkg", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        }
+    }
 
     /**
      * AppOps listener (camera, mic, location)
@@ -61,14 +114,24 @@ class SensorMonitorService : Service() {
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         cameraManager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
         appOpsManager = getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+        activityManager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
 
-        createNotificationChannel()
+        createNotificationChannels()
         val notification = createNotification("Privacy Guard is monitoring sensors")
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(notificationId, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } else {
             startForeground(notificationId, notification)
+        }
+
+        // Register receiver as EXPORTED so SystemUI can trigger it
+        val filter = IntentFilter(ACTION_KILL_APP)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(killReceiver, filter, Context.RECEIVER_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(killReceiver, filter)
         }
 
         setupMonitoring()
@@ -169,13 +232,14 @@ class SensorMonitorService : Service() {
                             sensorType = op,
                             isForeground = isForeground,
                             riskScore = risk.score,
+                            riskCategory = risk.category.name,
                             isAnomalous = risk.isAnomalous
                         )
                     )
-                    Log.i(TAG, "LOGGED: $packageName used $op (Risk: ${risk.score})")
+                    Log.i(TAG, "LOGGED: $packageName used $op (Risk: ${risk.score}, Category: ${risk.category})")
                     
-                    if (risk.isAnomalous) {
-                        showRiskNotification(packageName, op)
+                    if (risk.category != AccessCategory.EXPECTED) {
+                        showRiskNotification(packageName, op, risk)
                     }
                 }
             } catch (e: Exception) {
@@ -184,20 +248,40 @@ class SensorMonitorService : Service() {
         }
     }
 
-    private fun showRiskNotification(packageName: String, sensor: String) {
-        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+    private fun showRiskNotification(packageName: String, sensor: String, risk: RiskEngine.RiskResult) {
         val cleanSensor = sensor.replace("android:", "").uppercase()
         val appName = packageName.split(".").last().replaceFirstChar { it.uppercase() }
         
-        val notification = NotificationCompat.Builder(this, channelId)
-            .setContentTitle("Privacy Alert!")
-            .setContentText("$appName is using $cleanSensor in the background")
+        val (title, priority) = when(risk.category) {
+            AccessCategory.CRITICAL -> "⚠️ CRITICAL PRIVACY LEAK" to NotificationCompat.PRIORITY_MAX
+            AccessCategory.UNEXPECTED -> "🚨 Unexpected Access" to NotificationCompat.PRIORITY_HIGH
+            else -> "🔍 Suspicious Activity" to NotificationCompat.PRIORITY_DEFAULT
+        }
+
+        // Kill Action
+        val killIntent = Intent(ACTION_KILL_APP).apply {
+            putExtra(EXTRA_PACKAGE_NAME, packageName)
+            `package` = this@SensorMonitorService.packageName
+        }
+        val killPendingIntent = PendingIntent.getBroadcast(
+            this, 
+            packageName.hashCode(), 
+            killIntent, 
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification = NotificationCompat.Builder(this, alertChannelId)
+            .setContentTitle(title)
+            .setContentText("$appName is accessing $cleanSensor in the background!")
             .setSmallIcon(android.R.drawable.stat_sys_warning)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setPriority(priority)
+            .setCategory(NotificationCompat.CATEGORY_ALARM)
             .setAutoCancel(true)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Kill App", killPendingIntent)
             .build()
         
-        notificationManager.notify(System.currentTimeMillis().toInt(), notification)
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        nm.notify(packageName.hashCode(), notification)
     }
 
     private fun getForegroundPackageName(): String {
@@ -206,10 +290,20 @@ class SensorMonitorService : Service() {
         return stats?.maxByOrNull { it.lastTimeUsed }?.packageName ?: "unknown"
     }
 
-    private fun createNotificationChannel() {
+    private fun createNotificationChannels() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(channelId, "Sensor Monitoring", NotificationManager.IMPORTANCE_LOW)
-            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+            val manager = getSystemService(NotificationManager::class.java)
+            
+            val monitorChannel = NotificationChannel(channelId, "Sensor Monitoring", NotificationManager.IMPORTANCE_LOW)
+            manager.createNotificationChannel(monitorChannel)
+
+            val alertChannel = NotificationChannel(alertChannelId, "Privacy Alerts", NotificationManager.IMPORTANCE_HIGH).apply {
+                description = "High priority alerts for suspicious sensor access"
+                enableLights(true)
+                lightColor = android.graphics.Color.RED
+                enableVibration(true)
+            }
+            manager.createNotificationChannel(alertChannel)
         }
     }
 
@@ -225,6 +319,9 @@ class SensorMonitorService : Service() {
     }
 
     override fun onDestroy() {
+        try {
+            unregisterReceiver(killReceiver)
+        } catch (e: Exception) { /* ignore */ }
         serviceScope.cancel()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && opListener != null) {
             appOpsManager.stopWatchingActive(opListener)
