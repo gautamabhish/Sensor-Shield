@@ -272,7 +272,7 @@ fun HeaderSection() {
     ) {
         Column(Modifier.weight(1f)) {
             Text(
-                "Shield Enterprise",
+                "Sensor Shield",
                 style = MaterialTheme.typography.headlineMedium,
                 fontWeight = FontWeight.Black,
                 letterSpacing = (-1).sp
