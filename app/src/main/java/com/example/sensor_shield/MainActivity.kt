@@ -44,7 +44,8 @@ import com.example.sensor_shield.data.SensorEvent
 import com.example.sensor_shield.service.SensorMonitorService
 import com.example.sensor_shield.ui.SensorViewModel
 import com.example.sensor_shield.ui.theme.SensorShieldTheme
-
+import java.text.SimpleDateFormat
+import java.util.*
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -110,7 +111,13 @@ fun MainContainer(viewModel: SensorViewModel = viewModel()) {
                 }, label = "TabSwitch"
             ) { tab ->
                 when (tab) {
-                    0 -> Dashboard(events, privacyScore)
+                    0 -> Dashboard(
+                        events,
+                        privacyScore
+                    ) {
+                        selectedTab = 1
+                    }
+
                     1 -> LogScreen(events)
                     2 -> StatsScreen(events)
                     3 -> SettingsScreen()
@@ -121,7 +128,11 @@ fun MainContainer(viewModel: SensorViewModel = viewModel()) {
 }
 
 @Composable
-fun Dashboard(events: List<SensorEvent>, score: Int) {
+fun Dashboard(
+    events: List<SensorEvent>,
+    score: Int,
+    onViewAll: () -> Unit
+) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(20.dp),
@@ -140,7 +151,12 @@ fun Dashboard(events: List<SensorEvent>, score: Int) {
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 SectionTitle("Recent Detections")
-                Text("View All", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge, modifier = Modifier.clickable { })
+                Text(
+                    "View All",
+                    color = MaterialTheme.colorScheme.primary,
+                    style = MaterialTheme.typography.labelLarge,
+                    modifier = Modifier.clickable { onViewAll() }
+                )
             }
             RecentList(events)
         }
@@ -237,44 +253,151 @@ fun SensorBlob(label: String, icon: ImageVector, active: Boolean) {
 
 @Composable
 fun HeatmapGrid(events: List<SensorEvent>) {
+
+    val now = System.currentTimeMillis()
+
+    var selectedIndex by remember { mutableStateOf<Int?>(null) }
+
+    val buckets = remember(events) {
+        List(48) { index ->
+            val start = now - (48 - index) * 3600000
+            val end = start + 3600000
+            events.filter { it.timestamp in start..end }
+        }
+    }
+
     Card(
         Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(24.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(1.dp))
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceColorAtElevation(1.dp)
+        )
     ) {
+
         Column(Modifier.padding(20.dp)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+
                 repeat(12) { col ->
-                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+
                         repeat(4) { row ->
+
                             val index = col * 4 + row
-                            val intensity = events.count { (it.timestamp / 3600000) % 48 == index.toLong() }
+                            val eventsInBucket = buckets[index]
+                            val intensity = eventsInBucket.size
+
+                            val selected = selectedIndex == index
+
+                            val color =
+                                when {
+                                    intensity > 5 -> Color(0xFF4CAF50)
+                                    intensity > 2 -> Color(0xFF81C784)
+                                    intensity > 0 -> Color(0xFFA5D6A7)
+                                    else -> MaterialTheme.colorScheme.outlineVariant.copy(.2f)
+                                }
+
+                            val animatedColor by animateColorAsState(
+                                if (selected) Color(0xFF2196F3) else color,
+                                label = ""
+                            )
+
                             Box(
                                 Modifier
-                                    .size(22.dp)
-                                    .clip(RoundedCornerShape(5.dp))
-                                    .background(
-                                        when {
-                                            intensity > 5 -> Color(0xFF4CAF50)
-                                            intensity > 2 -> Color(0xFF81C784)
-                                            intensity > 0 -> Color(0xFFA5D6A7)
-                                            else -> MaterialTheme.colorScheme.outlineVariant.copy(0.2f)
-                                        }
+                                    .size(24.dp)
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(animatedColor)
+                                    .border(
+                                        if (selected) 2.dp else 0.dp,
+                                        MaterialTheme.colorScheme.primary,
+                                        RoundedCornerShape(6.dp)
                                     )
+                                    .clickable {
+                                        selectedIndex =
+                                            if (selectedIndex == index) null
+                                            else index
+                                    }
                             )
                         }
                     }
                 }
             }
-            Spacer(Modifier.height(14.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("Last 48 Hours Activity", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
-                Text("Intensity Gradient", style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+
+            Spacer(Modifier.height(16.dp))
+
+            AnimatedContent(
+                targetState = selectedIndex,
+                transitionSpec = {
+                    fadeIn() togetherWith fadeOut()
+                },
+                label = "heatmapDetails"
+            ) { index ->
+
+                if (index == null) {
+
+                    Text(
+                        "Tap a cell to inspect sensor activity",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = Color.Gray
+                    )
+
+                } else {
+
+                    val bucketEvents = buckets[index]
+
+                    val bucketStart = now - (48 - index) * 3600000
+                    val bucketEnd = bucketStart + 3600000
+
+                    val formatter = SimpleDateFormat("HH:mm", Locale.getDefault())
+
+                    val startText = formatter.format(Date(bucketStart))
+                    val endText = formatter.format(Date(bucketEnd))
+
+                    Column {
+
+                        Text(
+                            "$startText - $endText",
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        Spacer(Modifier.height(6.dp))
+
+                        Text(
+                            "${bucketEvents.size} sensor events detected",
+                            color = MaterialTheme.colorScheme.primary
+                        )
+
+                        Spacer(Modifier.height(8.dp))
+
+                        bucketEvents.take(4).forEach {
+
+                            Text(
+                                "• ${it.packageName.split('.').last()} (${it.sensorType})",
+                                fontSize = 12.sp
+                            )
+                        }
+
+                        if (bucketEvents.size > 4) {
+
+                            Text(
+                                "+ ${bucketEvents.size - 4} more",
+                                fontSize = 12.sp,
+                                color = Color.Gray
+                            )
+                        }
+                    }
+                }
             }
+
+            Spacer(Modifier.height(12.dp))
+
         }
     }
 }
-
 @Composable
 fun LogScreen(events: List<SensorEvent>) {
     Column(Modifier.fillMaxSize()) {
