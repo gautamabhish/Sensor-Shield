@@ -39,16 +39,15 @@ android {
         compose = true
     }
 }
+
 val roomVersion = "2.6.1"
 val workVersion = "2.9.0"
 val composeIconsVersion = "1.6.0"
 
-
-
 dependencies {
     implementation("androidx.room:room-runtime:$roomVersion")
     implementation("androidx.room:room-ktx:$roomVersion")
-    ksp("androidx.room:room-compiler:$roomVersion") // Switched to KSP
+    ksp("androidx.room:room-compiler:$roomVersion")
 
     // WorkManager
     implementation("androidx.work:work-runtime-ktx:$workVersion")
@@ -56,6 +55,7 @@ dependencies {
     // UI & Icons
     implementation("androidx.activity:activity-compose:1.8.2")
     implementation("androidx.compose.material:material-icons-extended:$composeIconsVersion")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.6.1")
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
