@@ -51,7 +51,6 @@ class SensorMonitorService : Service() {
     private val lastTxBytes = ConcurrentHashMap<String, Long>()
     private val lastSensorAccess = ConcurrentHashMap<String, Long>()
     private val recentlyLogged = ConcurrentHashMap<String, Long>()
-    private val watchList = ConcurrentHashMap.newKeySet<String>()
 
     private val opListener = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
         OnOpActiveChangedListener { op, _, packageName, active ->
@@ -99,61 +98,80 @@ class SensorMonitorService : Service() {
     private fun startPollingLoop() {
         serviceScope.launch {
             while (isActive) {
-                val fg = getForegroundPackageName()
-                if (fg != "unknown") watchList.add(fg)
-                
-                monitorWatchlistTraffic()
-                
-                // Cleanup watchlist (apps inactive for 15 mins)
-                val now = System.currentTimeMillis()
-                watchList.removeIf { pkg -> (now - (lastSensorAccess[pkg] ?: 0L)) > 15 * 60 * 1000 && pkg != fg }
-                
-                delay(10000) 
+                monitorAllAppTraffic()
+                delay(15000) 
             }
         }
     }
 
     private fun getUidTxBytes(uid: Int): Long {
         return try {
-            val bucket = networkStatsManager.querySummaryForUser(ConnectivityManager.TYPE_WIFI, null, 0, System.currentTimeMillis())
             var total = 0L
             val entry = NetworkStats.Bucket()
-            while (bucket.hasNextBucket()) {
-                bucket.getNextBucket(entry)
-                if (entry.uid == uid) total += entry.txBytes
+            val now = System.currentTimeMillis()
+            
+            networkStatsManager.querySummary(ConnectivityManager.TYPE_WIFI, null, 0, now).let { stats ->
+                while (stats.hasNextBucket()) {
+                    stats.getNextBucket(entry)
+                    if (entry.uid == uid) total += entry.txBytes
+                }
+                stats.close()
             }
-            // Add Mobile data as well
-            val mobileBucket = networkStatsManager.querySummaryForUser(ConnectivityManager.TYPE_MOBILE, null, 0, System.currentTimeMillis())
-            while (mobileBucket.hasNextBucket()) {
-                mobileBucket.getNextBucket(entry)
-                if (entry.uid == uid) total += entry.txBytes
+
+            networkStatsManager.querySummary(ConnectivityManager.TYPE_MOBILE, null, 0, now).let { stats ->
+                while (stats.hasNextBucket()) {
+                    stats.getNextBucket(entry)
+                    if (entry.uid == uid) total += entry.txBytes
+                }
+                stats.close()
             }
             total
         } catch (e: Exception) { 0L }
     }
 
-    private fun monitorWatchlistTraffic() {
-        val foregroundPkg = getForegroundPackageName()
+    private fun monitorAllAppTraffic() {
         val now = System.currentTimeMillis()
+        val foregroundPkg = getForegroundPackageName()
+        
+        val uidTraffic = mutableMapOf<Int, Long>()
+        val bucket = NetworkStats.Bucket()
 
-        watchList.forEach { pkg ->
+        fun collect(type: Int) {
             try {
-                val uid = packageManager.getApplicationInfo(pkg, 0).uid
-                val currentTx = getUidTxBytes(uid)
-                val prevTx = lastTxBytes[pkg] ?: run {
-                    lastTxBytes[pkg] = currentTx
-                    return@forEach
+                val stats = networkStatsManager.querySummary(type, null, 0, now)
+                while (stats.hasNextBucket()) {
+                    stats.getNextBucket(bucket)
+                    uidTraffic[bucket.uid] = (uidTraffic[bucket.uid] ?: 0L) + bucket.txBytes
                 }
+                stats.close()
+            } catch (e: Exception) {}
+        }
 
-                val delta = currentTx - prevTx
-                if (delta > 1024) { // Log any upload > 1KB
-                    val lastSensorTime = lastSensorAccess[pkg] ?: 0L
-                    val isDelayedExfil = (now - lastSensorTime) < 20 * 60 * 1000 && delta > 500 * 1024
-                    
-                    logEvent(pkg, if (isDelayedExfil) "DELAYED_EXFILTRATION" else "NETWORK", delta, pkg == foregroundPkg)
-                    lastTxBytes[pkg] = currentTx
+        collect(ConnectivityManager.TYPE_WIFI)
+        collect(ConnectivityManager.TYPE_MOBILE)
+
+        uidTraffic.forEach { (uid, currentTx) ->
+            val packages = try { packageManager.getPackagesForUid(uid) } catch (e: Exception) { null } ?: return@forEach
+            packages.forEach { pkg ->
+                if (pkg == packageName || pkg == "android") return@forEach
+                
+                val prevTx = lastTxBytes[pkg]
+                if (prevTx != null && currentTx > prevTx) {
+                    val delta = currentTx - prevTx
+                    if (delta > 5120) { // Significant transfer > 5KB
+                        val lastSensorTime = lastSensorAccess[pkg] ?: 0L
+                        val isDelayedExfil = (now - lastSensorTime) < 30 * 60 * 1000 && delta > 500 * 1024
+                        
+                        val category = if (isDelayedExfil) "CRITICAL" else if (delta > 1024 * 1024) "SUSPICIOUS" else "EXPECTED"
+                        logEvent(pkg, if (isDelayedExfil) "DELAYED_EXFILTRATION" else "NETWORK", delta, pkg == foregroundPkg, category)
+                        
+                        if (category != "EXPECTED") {
+                             showAlert(pkg, if (isDelayedExfil) "Exfiltration Risk" else "Data Spike", delta)
+                        }
+                    }
                 }
-            } catch (e: Exception) { watchList.remove(pkg) }
+                lastTxBytes[pkg] = currentTx
+            }
         }
     }
 
@@ -169,12 +187,11 @@ class SensorMonitorService : Service() {
         if (System.currentTimeMillis() - (recentlyLogged[key] ?: 0L) < 15000) return
         recentlyLogged[key] = System.currentTimeMillis()
         lastSensorAccess[packageName] = System.currentTimeMillis()
-        watchList.add(packageName)
 
         serviceScope.launch {
             val uid = try { packageManager.getApplicationInfo(packageName, 0).uid } catch (e: Exception) { -1 }
             val startTx = if (uid != -1) getUidTxBytes(uid) else 0L
-            delay(12000)
+            delay(15000)
             val endTx = if (uid != -1) getUidTxBytes(uid) else 0L
             val bytes = (endTx - startTx).coerceAtLeast(0L)
 
@@ -208,19 +225,21 @@ class SensorMonitorService : Service() {
 
     private fun getForegroundPackageName(): String {
         val end = System.currentTimeMillis()
-        val events = usageStatsManager.queryEvents(end - 10000, end)
+        val events = usageStatsManager.queryEvents(end - 30000, end)
         val event = UsageEvents.Event()
         var lastPkg = "unknown"
         while (events.hasNextEvent()) {
             events.getNextEvent(event)
-            if (event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND) lastPkg = event.packageName
+            if (event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND || event.eventType == UsageEvents.Event.ACTIVITY_RESUMED) {
+                lastPkg = event.packageName
+            }
         }
         return lastPkg
     }
 
     private fun showAlert(pkg: String, sensor: String, bytes: Long) {
         val appName = pkg.split(".").last().replaceFirstChar { it.uppercase() }
-        val content = if (bytes > 0) "Critical Leak: $appName sent ${formatBytes(bytes)} during $sensor use!" 
+        val content = if (bytes > 10240) "Significant Data Transfer: $appName sent ${formatBytes(bytes)} while using $sensor!"
                      else "$appName is accessing $sensor in the background."
 
         val killIntent = Intent(this, NotificationActionActivity::class.java).apply { 
