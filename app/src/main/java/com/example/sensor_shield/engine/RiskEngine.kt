@@ -1,7 +1,7 @@
 package com.example.sensor_shield.engine
 
 enum class AccessCategory {
-    EXPECTED, SUSPICIOUS, UNEXPECTED, CRITICAL
+    EXPECTED, SUSPICIOUS, CRITICAL
 }
 
 object RiskEngine {
@@ -45,10 +45,9 @@ object RiskEngine {
 
         val finalScore = score.coerceIn(0.0, 1.0)
 
-        // 5. Categorization Logic
+        // 5. Categorization Logic - Simplified to Expected, Suspicious, Critical
         val category = when {
-            finalScore >= 0.85 || (isHighlySensitive && !isScreenOn && !isForeground && trustAdjustment(packageName) > -0.1) -> AccessCategory.CRITICAL
-            finalScore >= 0.65 -> AccessCategory.UNEXPECTED
+            finalScore >= 0.75 || (isHighlySensitive && !isScreenOn && !isForeground && trustAdjustment(packageName) > -0.1) -> AccessCategory.CRITICAL
             finalScore >= 0.45 -> AccessCategory.SUSPICIOUS
             else -> AccessCategory.EXPECTED
         }
@@ -56,7 +55,7 @@ object RiskEngine {
         return RiskResult(
             score = finalScore,
             category = category,
-            isAnomalous = category == AccessCategory.UNEXPECTED || category == AccessCategory.CRITICAL
+            isAnomalous = category != AccessCategory.EXPECTED
         )
     }
 

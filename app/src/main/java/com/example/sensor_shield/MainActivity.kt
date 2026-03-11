@@ -39,6 +39,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -129,7 +130,7 @@ fun PermissionScreen(content: @Composable () -> Unit) {
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 8.dp),
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    textAlign = TextAlign.Center
                 )
                 Spacer(Modifier.height(32.dp))
                 
@@ -185,6 +186,8 @@ fun hasUsageStatsPermission(context: Context): Boolean {
 @Composable
 fun MainContainer(viewModel: SensorViewModel = viewModel()) {
     var selectedTab by remember { mutableIntStateOf(0) }
+    var selectedPackage by remember { mutableStateOf<String?>(null) }
+    
     val events by viewModel.allEvents.collectAsState(initial = emptyList())
     val trustedApps by viewModel.trustedApps.collectAsState(initial = emptyList())
     val privacyScore = viewModel.getPrivacyScore(events)
@@ -194,7 +197,10 @@ fun MainContainer(viewModel: SensorViewModel = viewModel()) {
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         bottomBar = {
-            IndustryNavigationBar(selectedTab) { selectedTab = it }
+            IndustryNavigationBar(selectedTab) { 
+                selectedTab = it 
+                if (it != 2) selectedPackage = null // Clear selection if leaving behavior tab
+            }
         }
     ) { padding ->
         Box(modifier = Modifier.padding(padding).fillMaxSize()) {
@@ -205,9 +211,25 @@ fun MainContainer(viewModel: SensorViewModel = viewModel()) {
                 }, label = "TabSwitch"
             ) { tab ->
                 when (tab) {
-                    0 -> Dashboard(events, privacyScore, suspiciousCount, suspects) { selectedTab = 1 }
+                    0 -> Dashboard(
+                        events, 
+                        privacyScore, 
+                        suspiciousCount, 
+                        suspects, 
+                        onSeeAll = { selectedTab = 1 },
+                        onAppClick = { pkg ->
+                            selectedPackage = pkg
+                            selectedTab = 2
+                        }
+                    )
                     1 -> LogScreen(events)
-                    2 -> BehaviorAnalysisScreen(viewModel.buildBehaviorProfiles(events), events)
+                    2 -> BehaviorAnalysisScreen(
+                        viewModel.buildBehaviorProfiles(events), 
+                        events,
+                        selectedPackage,
+                        onTrust = { viewModel.trustApp(it) },
+                        onPackageSelected = { selectedPackage = it }
+                    )
                     3 -> SettingsScreen(trustedApps) { viewModel.untrustApp(it) }
                 }
             }
@@ -216,7 +238,14 @@ fun MainContainer(viewModel: SensorViewModel = viewModel()) {
 }
 
 @Composable
-fun Dashboard(events: List<SensorEvent>, score: Int, suspiciousCount: Int, suspects: List<Pair<String, Int>>, onSeeAll: () -> Unit) {
+fun Dashboard(
+    events: List<SensorEvent>, 
+    score: Int, 
+    suspiciousCount: Int, 
+    suspects: List<Pair<String, Int>>, 
+    onSeeAll: () -> Unit,
+    onAppClick: (String) -> Unit
+) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(top = 24.dp, start = 20.dp, end = 20.dp, bottom = 32.dp),
@@ -228,7 +257,7 @@ fun Dashboard(events: List<SensorEvent>, score: Int, suspiciousCount: Int, suspe
         if (suspects.isNotEmpty()) {
             item {
                 SectionHeader("Vulnerability Audit", "High risk applications")
-                SuspectsCard(suspects)
+                SuspectsCard(suspects, onAppClick)
             }
         }
 
@@ -238,11 +267,11 @@ fun Dashboard(events: List<SensorEvent>, score: Int, suspiciousCount: Int, suspe
                 val recent = events.filter { it.timestamp > System.currentTimeMillis() - 15000 }
                 val cameraEvent = recent.find { it.sensorType.contains("camera", true) }
                 val micEvent = recent.find { it.sensorType.contains("audio", true) || it.sensorType.contains("mic", true) }
-                val locEvent = recent.find { it.sensorType.contains("location", true) }
+                val networkEvent = recent.find { it.sensorType.contains("NETWORK", true) || it.sensorType.contains("EXFILTRATION", true) || it.bytesUploaded > 500 * 1024 }
 
                 StatusTile("Visual", Icons.Rounded.CameraAlt, cameraEvent != null, cameraEvent?.packageName, Modifier.weight(1f))
                 StatusTile("Acoustic", Icons.Rounded.Mic, micEvent != null, micEvent?.packageName, Modifier.weight(1f))
-                StatusTile("Geospatial", Icons.Rounded.LocationOn, locEvent != null, locEvent?.packageName, Modifier.weight(1f))
+                StatusTile("Network", Icons.Rounded.NetworkCheck, networkEvent != null, networkEvent?.packageName, Modifier.weight(1f))
             }
         }
 
@@ -348,7 +377,7 @@ fun MainScoreCard(score: Int, suspiciousCount: Int) {
 }
 
 @Composable
-fun SuspectsCard(suspects: List<Pair<String, Int>>) {
+fun SuspectsCard(suspects: List<Pair<String, Int>>, onAppClick: (String) -> Unit) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(24.dp),
@@ -358,7 +387,7 @@ fun SuspectsCard(suspects: List<Pair<String, Int>>) {
         Column(Modifier.padding(16.dp)) {
             suspects.forEachIndexed { index, (pkg, count) ->
                 Row(
-                    Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                    Modifier.fillMaxWidth().padding(vertical = 8.dp).clickable { onAppClick(pkg) },
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Box(
@@ -570,6 +599,8 @@ fun LogItem(event: SensorEvent) {
                 val icon = when {
                     event.sensorType.contains("camera") -> Icons.Rounded.CameraAlt
                     event.sensorType.contains("audio") || event.sensorType.contains("mic") -> Icons.Rounded.Mic
+                    event.sensorType.contains("EXFILTRATION") -> Icons.Rounded.LeakAdd
+                    event.sensorType.contains("NETWORK") -> Icons.Rounded.NetworkCheck
                     else -> Icons.Rounded.LocationOn
                 }
                 Icon(icon, null, tint = color, modifier = Modifier.size(18.dp))
@@ -577,8 +608,14 @@ fun LogItem(event: SensorEvent) {
             Spacer(Modifier.width(16.dp))
             Column(Modifier.weight(1f)) {
                 Text(event.packageName.split(".").last(), fontWeight = FontWeight.Bold)
+                val detail = when {
+                    event.sensorType == "DELAYED_EXFILTRATION" -> "Harvest-then-Leak (${formatBytes(event.bytesUploaded)})"
+                    event.sensorType == "NETWORK_SPIKE" -> "Sudden Background Upload (${formatBytes(event.bytesUploaded)})"
+                    event.bytesUploaded > 0 -> "${if(event.isForeground) "Foreground" else "Background"} + ${formatBytes(event.bytesUploaded)} sent"
+                    else -> "${if(event.isForeground) "Foreground" else "Background"} process"
+                }
                 Text(
-                    "${if(event.isForeground) "Foreground" else "Background"} process",
+                    detail,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -595,29 +632,38 @@ fun LogItem(event: SensorEvent) {
     }
 }
 
+fun formatBytes(bytes: Long): String {
+    return when {
+        bytes >= 1024 * 1024 -> "%.1f MB".format(bytes / (1024f * 1024f))
+        bytes >= 1024 -> "${bytes / 1024} KB"
+        else -> "$bytes B"
+    }
+}
+
 @Composable
-fun BehaviorAnalysisScreen(profiles: List<AppBehaviorProfile>, events: List<SensorEvent>) {
+fun BehaviorAnalysisScreen(
+    profiles: List<AppBehaviorProfile>, 
+    events: List<SensorEvent>,
+    selectedPackage: String?,
+    onTrust: (String) -> Unit,
+    onPackageSelected: (String?) -> Unit
+) {
     var searchQuery by remember { mutableStateOf("") }
     var filter by remember { mutableStateOf("ALL") }
-    var selectedPackage by remember { mutableStateOf<String?>(null) }
 
     if (selectedPackage != null) {
         val profile = profiles.find { it.packageName == selectedPackage }
         val appEvents = events.filter { it.packageName == selectedPackage }
         if (profile != null) {
-            AppBehaviorDetailScreen(profile, appEvents) { selectedPackage = null }
+            AppBehaviorDetailScreen(profile, appEvents, onTrust) { onPackageSelected(null) }
         } else {
-            selectedPackage = null
+            onPackageSelected(null)
         }
         return
     }
 
     val filteredProfiles = profiles.filter { profile ->
-        val risk = when {
-            profile.lastRiskCategory == "CRITICAL" || profile.uploadSpikes > 0 -> "CRITICAL"
-            profile.backgroundCount > 3 -> "HIGH"
-            else -> "LOW"
-        }
+        val risk = profile.lastRiskCategory
         val matchesFilter = filter == "ALL" || (filter == risk)
         val matchesSearch = profile.packageName.contains(searchQuery, ignoreCase = true)
         matchesFilter && matchesSearch
@@ -643,7 +689,7 @@ fun BehaviorAnalysisScreen(profiles: List<AppBehaviorProfile>, events: List<Sens
             
             Spacer(Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf("ALL", "CRITICAL", "HIGH", "LOW").forEach { type ->
+                listOf("ALL", "EXPECTED", "SUSPICIOUS", "CRITICAL").forEach { type ->
                     FilterChip(
                         selected = filter == type,
                         onClick = { filter = type },
@@ -661,14 +707,14 @@ fun BehaviorAnalysisScreen(profiles: List<AppBehaviorProfile>, events: List<Sens
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             items(filteredProfiles) { profile ->
-                BehaviorProfileCard(profile) { selectedPackage = profile.packageName }
+                BehaviorProfileCard(profile) { onPackageSelected(profile.packageName) }
             }
         }
     }
 }
 
 @Composable
-fun AppBehaviorDetailScreen(profile: AppBehaviorProfile, events: List<SensorEvent>, onBack: () -> Unit) {
+fun AppBehaviorDetailScreen(profile: AppBehaviorProfile, events: List<SensorEvent>, onTrust: (String) -> Unit, onBack: () -> Unit) {
     val context = LocalContext.current
     BackHandler { onBack() }
 
@@ -693,7 +739,52 @@ fun AppBehaviorDetailScreen(profile: AppBehaviorProfile, events: List<SensorEven
             verticalArrangement = Arrangement.spacedBy(24.dp)
         ) {
             item {
-                SectionHeader("Vector Distribution", "Overall sensor access counts")
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(24.dp),
+                    color = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+                ) {
+                    Column(Modifier.padding(24.dp)) {
+                        val windowText = if (profile.typicalHours.isNotEmpty()) {
+                            "${profile.typicalHours.first()}:00 – ${profile.typicalHours.last()}:00"
+                        } else {
+                            "Insufficient data"
+                        }
+                        
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Column {
+                                Text("Typical Activity Window", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(windowText, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black)
+                            }
+                            Column(horizontalAlignment = Alignment.End) {
+                                Text("Foreground Rate", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("${(profile.foregroundRate * 100).toInt()}%", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black, color = MaterialTheme.colorScheme.primary)
+                            }
+                        }
+                        
+                        Spacer(Modifier.height(20.dp))
+                        
+                        Text("Usage Profile", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.height(8.dp))
+                        Row(Modifier.fillMaxWidth().height(8.dp).clip(CircleShape).background(MaterialTheme.colorScheme.outlineVariant)) {
+                            Box(Modifier.fillMaxHeight().weight(profile.foregroundRate.toFloat().coerceAtLeast(0.01f)).background(MaterialTheme.colorScheme.primary))
+                            Box(Modifier.fillMaxHeight().weight((1.0 - profile.foregroundRate).toFloat().coerceAtLeast(0.01f)).background(MaterialTheme.colorScheme.error.copy(0.5f)))
+                        }
+                        Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Foreground", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                            Text("Background", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+                        }
+                        
+                        Spacer(Modifier.height(20.dp))
+                        Text("Cumulative Network Traffic", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(formatBytes(profile.totalBytesUploaded), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black, color = Color(0xFF9C27B0))
+                    }
+                }
+            }
+
+            item {
+                SectionHeader("Average daily vector access", "")
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(24.dp),
@@ -701,16 +792,19 @@ fun AppBehaviorDetailScreen(profile: AppBehaviorProfile, events: List<SensorEven
                     border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
                 ) {
                     Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
-                        val total = (profile.cameraCount + profile.micCount + profile.locationCount).coerceAtLeast(1)
-                        AnalyticsBar("Visual Access", profile.cameraCount, total, MaterialTheme.colorScheme.primary)
-                        AnalyticsBar("Acoustic Access", profile.micCount, total, MaterialTheme.colorScheme.error)
-                        AnalyticsBar("Geospatial Access", profile.locationCount, total, MaterialTheme.colorScheme.tertiary)
+                        val firstEvent = events.minByOrNull { it.timestamp }?.timestamp ?: System.currentTimeMillis()
+                        val days = ((System.currentTimeMillis() - firstEvent) / 86400000.0).coerceAtLeast(1.0)
+                        
+                        PatternSummaryBar("Camera usage", profile.cameraCount, days, MaterialTheme.colorScheme.primary)
+                        PatternSummaryBar("Mic usage", profile.micCount, days, MaterialTheme.colorScheme.error)
+                        PatternSummaryBar("Location usage", profile.locationCount, days, MaterialTheme.colorScheme.tertiary)
+                        PatternSummaryBar("Data anomalies", profile.dataAccessCount, days, Color(0xFF9C27B0))
                     }
                 }
             }
 
             item {
-                SectionHeader("Temporal Analysis", "Sensor activity over time (Last 24h)")
+                SectionHeader("Sensor activity over time (Last 24h)", "")
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(24.dp),
@@ -722,7 +816,7 @@ fun AppBehaviorDetailScreen(profile: AppBehaviorProfile, events: List<SensorEven
             }
 
             item {
-                SectionHeader("Pattern Detection", "Identified behavioral anomalies")
+                SectionHeader("Anomaly Detection", "Baseline deviations detected")
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(24.dp),
@@ -730,34 +824,76 @@ fun AppBehaviorDetailScreen(profile: AppBehaviorProfile, events: List<SensorEven
                     border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
                 ) {
                     Column(Modifier.padding(20.dp)) {
-                        if (profile.screenOffCount > 0) PatternAlert("Screen-Off Surveillance", "${profile.screenOffCount} events recorded while screen inactive")
-                        if (profile.uploadSpikes > 0) PatternAlert("Data Exfiltration", "${profile.uploadSpikes} network spikes correlated with sensor use")
-                        if (profile.multiSensorCount > 0) PatternAlert("Multi-Sensor Correlation", "${profile.multiSensorCount} instances of simultaneous sensor access")
-                        if (profile.backgroundCount > 3) PatternAlert("Persistent Background Access", "Frequent sensor polling while not in foreground")
+                        val currentHour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+                        if (profile.typicalHours.isNotEmpty() && !profile.typicalHours.contains(currentHour)) {
+                            PatternAlert("Out-of-Hours Access", "This application is accessing sensors outside its typical 24h usage window.")
+                        }
                         
-                        if (profile.screenOffCount == 0 && profile.uploadSpikes == 0 && profile.multiSensorCount == 0 && profile.backgroundCount <= 3) {
-                            Text("No major suspicious patterns detected.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (profile.screenOffCount > 0) PatternAlert("Screen-Off Surveillance", "${profile.screenOffCount} events recorded while device was completely inactive.")
+                        if (profile.uploadSpikes > 0) PatternAlert("Data Exfiltration", "${profile.uploadSpikes} high-volume network uploads occurred immediately after sensor access.")
+                        if (profile.multiSensorCount > 0) PatternAlert("Sensor Aggregation", "Detected ${profile.multiSensorCount} instances of multiple sensors being polled simultaneously.")
+                        
+                        if (events.any { it.sensorType == "DELAYED_EXFILTRATION" }) {
+                             PatternAlert("Harvest-and-Leak Pattern", "Detected data harvesting during sensor use followed by background exfiltration.")
+                        }
+
+                        if (profile.backgroundCount > 0 && profile.foregroundRate > 0.9) {
+                            PatternAlert("Background Deviation", "This app is normally 90%+ foreground, but background access was recently recorded.")
+                        }
+
+                        if (profile.screenOffCount == 0 && profile.uploadSpikes == 0 && profile.multiSensorCount == 0 && profile.backgroundCount <= 3 && !events.any { it.sensorType.contains("NETWORK") || it.sensorType.contains("EXFILTRATION") }) {
+                            Text("No major behavioral deviations identified against baseline profile.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
                 }
             }
 
             item {
-                Button(
-                    onClick = {
-                        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                            data = Uri.fromParts("package", profile.packageName, null)
-                        }
-                        context.startActivity(intent)
-                    },
-                    modifier = Modifier.fillMaxWidth().height(56.dp),
-                    shape = RoundedCornerShape(16.dp)
-                ) {
-                    Icon(Icons.Rounded.Settings, null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Modify System Permissions")
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Button(
+                        onClick = {
+                            onTrust(profile.packageName)
+                            onBack()
+                        },
+                        modifier = Modifier.fillMaxWidth().height(56.dp),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primaryContainer, contentColor = MaterialTheme.colorScheme.onPrimaryContainer)
+                    ) {
+
+                        Text("Mark Application as Trusted")
+                    }
+
+                    Button(
+                        onClick = {
+                            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                data = Uri.fromParts("package", profile.packageName, null)
+                            }
+                            context.startActivity(intent)
+                        },
+                        modifier = Modifier.fillMaxWidth().height(56.dp),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                    ) {
+                        Text("Enforce Permission Restrictions")
+                    }
                 }
             }
+        }
+    }
+}
+
+@Composable
+fun PatternSummaryBar(label: String, count: Int, days: Double, color: Color) {
+    val perDay = (count / days).toInt()
+    Column {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Bottom) {
+            Text(label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+            Text("$perDay/day", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Black, color = color)
+        }
+        Spacer(Modifier.height(8.dp))
+        Box(Modifier.fillMaxWidth().height(12.dp).clip(RoundedCornerShape(4.dp)).background(MaterialTheme.colorScheme.outlineVariant)) {
+            val progress = (perDay / 20f).coerceIn(0.05f, 1f)
+            Box(Modifier.fillMaxHeight().fillMaxWidth(progress).background(color))
         }
     }
 }
@@ -771,6 +907,7 @@ fun TimeSeriesGraph(events: List<SensorEvent>) {
     val cameraBuckets = IntArray(24)
     val micBuckets = IntArray(24)
     val locBuckets = IntArray(24)
+    val netBuckets = IntArray(24)
 
     eventsLast24h.forEach {
         val hourAgo = ((now - it.timestamp) / 3600000).toInt()
@@ -780,11 +917,12 @@ fun TimeSeriesGraph(events: List<SensorEvent>) {
                 it.sensorType.contains("camera", true) -> cameraBuckets[bucketIdx]++
                 it.sensorType.contains("audio", true) || it.sensorType.contains("mic", true) -> micBuckets[bucketIdx]++
                 it.sensorType.contains("location", true) -> locBuckets[bucketIdx]++
+                it.sensorType.contains("NETWORK", true) || it.sensorType.contains("EXFILTRATION", true) -> netBuckets[bucketIdx]++
             }
         }
     }
     
-    val max = (0..23).maxOf { (cameraBuckets[it] + micBuckets[it] + locBuckets[it]) }.coerceAtLeast(1)
+    val max = (0..23).maxOf { (cameraBuckets[it] + micBuckets[it] + locBuckets[it] + netBuckets[it]) }.coerceAtLeast(1)
 
     Column(Modifier.padding(20.dp)) {
         Row(
@@ -796,11 +934,13 @@ fun TimeSeriesGraph(events: List<SensorEvent>) {
                 val cam = cameraBuckets[i]
                 val mic = micBuckets[i]
                 val loc = locBuckets[i]
-                val total = cam + mic + loc
+                val net = netBuckets[i]
+                val total = cam + mic + loc + net
                 
                 Column(Modifier.weight(1f).fillMaxHeight()) {
                     Spacer(Modifier.weight(1f))
                     if (total > 0) {
+                        if (net > 0) Box(Modifier.fillMaxWidth().weight(net.toFloat() / max).background(Color(0xFF9C27B0)))
                         if (loc > 0) Box(Modifier.fillMaxWidth().weight(loc.toFloat() / max).background(MaterialTheme.colorScheme.tertiary))
                         if (mic > 0) Box(Modifier.fillMaxWidth().weight(mic.toFloat() / max).background(MaterialTheme.colorScheme.error))
                         if (cam > 0) Box(Modifier.fillMaxWidth().weight(cam.toFloat() / max).background(MaterialTheme.colorScheme.primary))
@@ -814,10 +954,12 @@ fun TimeSeriesGraph(events: List<SensorEvent>) {
         Spacer(Modifier.height(12.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
             LegendItem("Camera", MaterialTheme.colorScheme.primary)
-            Spacer(Modifier.width(16.dp))
+            Spacer(Modifier.width(8.dp))
             LegendItem("Mic", MaterialTheme.colorScheme.error)
-            Spacer(Modifier.width(16.dp))
-            LegendItem("Location", MaterialTheme.colorScheme.tertiary)
+            Spacer(Modifier.width(8.dp))
+            LegendItem("Loc", MaterialTheme.colorScheme.tertiary)
+            Spacer(Modifier.width(8.dp))
+            LegendItem("Net", Color(0xFF9C27B0))
         }
     }
 }
@@ -849,8 +991,12 @@ fun BehaviorProfileCard(profile: AppBehaviorProfile, onClick: () -> Unit) {
                     Text(profile.packageName.split(".").last().replaceFirstChar { it.uppercase() }, fontWeight = FontWeight.Bold)
                     Text(profile.packageName, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                val risk = if (profile.lastRiskCategory == "CRITICAL" || profile.uploadSpikes > 0) "CRITICAL" else if (profile.backgroundCount > 3) "HIGH" else "LOW"
-                Text(risk, color = if (risk == "CRITICAL") MaterialTheme.colorScheme.error else if (risk == "HIGH") Color(0xFFD29922) else MaterialTheme.colorScheme.tertiary, fontWeight = FontWeight.Black, fontSize = 12.sp)
+                val risk = profile.lastRiskCategory
+                Text(risk, color = when(risk) {
+                    "CRITICAL" -> MaterialTheme.colorScheme.error
+                    "SUSPICIOUS" -> Color(0xFFD29922)
+                    else -> MaterialTheme.colorScheme.tertiary
+                }, fontWeight = FontWeight.Black, fontSize = 12.sp)
             }
             
             Spacer(Modifier.height(20.dp))
@@ -859,43 +1005,45 @@ fun BehaviorProfileCard(profile: AppBehaviorProfile, onClick: () -> Unit) {
                 BehaviorStat("Camera", profile.cameraCount, Icons.Rounded.CameraAlt)
                 BehaviorStat("Mic", profile.micCount, Icons.Rounded.Mic)
                 BehaviorStat("Loc", profile.locationCount, Icons.Rounded.LocationOn)
-                BehaviorStat("Bkg", profile.backgroundCount, Icons.Rounded.History)
+                BehaviorStat("Data", profile.dataAccessCount, Icons.Rounded.NetworkCheck)
+                BehaviorStat("Sent", 0, Icons.Rounded.Upload, formatBytes(profile.totalBytesUploaded))
+            }
+
+            Spacer(Modifier.height(16.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(Modifier.height(16.dp))
+
+            val windowText = if (profile.typicalHours.isNotEmpty()) {
+                "${profile.typicalHours.first()}:00 – ${profile.typicalHours.last()}:00"
+            } else {
+                "Calculating..."
+            }
+            
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Column {
+                    Text("Baseline Window", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(windowText, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                }
+                Column(horizontalAlignment = Alignment.End) {
+                    Text("Integrity", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("${(profile.foregroundRate * 100).toInt()}% Foreground", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                }
             }
             
             if (profile.screenOffCount > 0 || profile.uploadSpikes > 0 || profile.multiSensorCount > 0) {
-                Spacer(Modifier.height(16.dp))
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                Spacer(Modifier.height(16.dp))
-                
-                if (profile.screenOffCount > 0) {
-                    PatternAlert("Screen-Off Surveillance", "Sensors accessed while screen was inactive")
-                }
-                if (profile.uploadSpikes > 0) {
-                    PatternAlert("Data Exfiltration", "High network upload correlated with sensor use")
-                }
-                if (profile.multiSensorCount > 0) {
-                    PatternAlert("Multi-Sensor Correlation", "Different sensors used within short window")
-                }
-            }
-            
-            if (profile.totalBytesUploaded > 0) {
                 Spacer(Modifier.height(12.dp))
-                Text(
-                    "Total Data Correlated: ${profile.totalBytesUploaded / 1024} KB",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                    fontWeight = FontWeight.Bold
-                )
+                if (profile.screenOffCount > 0) PatternAlert("Screen-Off Surveillance", "Detected while inactive")
+                if (profile.uploadSpikes > 0) PatternAlert("Data Exfiltration", "High correlated upload")
             }
         }
     }
 }
 
 @Composable
-fun BehaviorStat(label: String, count: Int, icon: ImageVector) {
+fun BehaviorStat(label: String, count: Int, icon: ImageVector, customValue: String? = null) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Icon(icon, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(16.dp))
-        Text("$count", fontWeight = FontWeight.Black, fontSize = 14.sp)
+        Text(customValue ?: "$count", fontWeight = FontWeight.Black, fontSize = 14.sp)
         Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
