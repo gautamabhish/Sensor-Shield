@@ -263,14 +263,16 @@ fun Dashboard(
 
         item {
             SectionHeader("Active Surveillance", "Real-time hardware status")
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 val recent = events.filter { it.timestamp > System.currentTimeMillis() - 15000 }
                 val cameraEvent = recent.find { it.sensorType.contains("camera", true) }
                 val micEvent = recent.find { it.sensorType.contains("audio", true) || it.sensorType.contains("mic", true) }
+                val locEvent = recent.find { it.sensorType.contains("location", true) }
                 val networkEvent = recent.find { it.sensorType.contains("NETWORK", true) || it.sensorType.contains("EXFILTRATION", true) || it.bytesUploaded > 500 * 1024 }
 
                 StatusTile("Visual", Icons.Rounded.CameraAlt, cameraEvent != null, cameraEvent?.packageName, Modifier.weight(1f))
                 StatusTile("Acoustic", Icons.Rounded.Mic, micEvent != null, micEvent?.packageName, Modifier.weight(1f))
+                StatusTile("Geospatial", Icons.Rounded.LocationOn, locEvent != null, locEvent?.packageName, Modifier.weight(1f))
                 StatusTile("Network", Icons.Rounded.NetworkCheck, networkEvent != null, networkEvent?.packageName, Modifier.weight(1f))
             }
         }
@@ -746,15 +748,18 @@ fun AppBehaviorDetailScreen(profile: AppBehaviorProfile, events: List<SensorEven
                     border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
                 ) {
                     Column(Modifier.padding(24.dp)) {
-                        val windowText = if (profile.typicalHours.isNotEmpty()) {
-                            "${profile.typicalHours.first()}:00 – ${profile.typicalHours.last()}:00"
+                        val activeHours = profile.typicalHours
+                        val windowText = if (activeHours.isNotEmpty()) {
+                            val start = activeHours.first()
+                            val end = activeHours.last()
+                            if (start == end) "$start:00" else "$start:00 – $end:00"
                         } else {
-                            "Insufficient data"
+                            "Baseline under development"
                         }
                         
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                             Column {
-                                Text("Typical Activity Window", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text("High-Activity Window", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 Text(windowText, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Black)
                             }
                             Column(horizontalAlignment = Alignment.End) {
@@ -798,7 +803,7 @@ fun AppBehaviorDetailScreen(profile: AppBehaviorProfile, events: List<SensorEven
                         PatternSummaryBar("Camera usage", profile.cameraCount, days, MaterialTheme.colorScheme.primary)
                         PatternSummaryBar("Mic usage", profile.micCount, days, MaterialTheme.colorScheme.error)
                         PatternSummaryBar("Location usage", profile.locationCount, days, MaterialTheme.colorScheme.tertiary)
-                        PatternSummaryBar("Data anomalies", profile.dataAccessCount, days, Color(0xFF9C27B0))
+                        PatternSummaryBar("Data access", profile.dataAccessCount, days, Color(0xFF9C27B0))
                     }
                 }
             }
@@ -825,23 +830,27 @@ fun AppBehaviorDetailScreen(profile: AppBehaviorProfile, events: List<SensorEven
                 ) {
                     Column(Modifier.padding(20.dp)) {
                         val currentHour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+                        
+                        // Statistical Anomaly Alerts
+                        if (profile.statisticalAnomalyCount > 0) {
+                            PatternAlert("Network Volatility", "Detected ${profile.statisticalAnomalyCount} instances of statistically improbable data spikes.")
+                        }
+
                         if (profile.typicalHours.isNotEmpty() && !profile.typicalHours.contains(currentHour)) {
-                            PatternAlert("Out-of-Hours Access", "This application is accessing sensors outside its typical 24h usage window.")
+                            PatternAlert("Atypical Access", "This application is currently accessing sensors outside its statistically normal usage window.")
                         }
                         
-                        if (profile.screenOffCount > 0) PatternAlert("Screen-Off Surveillance", "${profile.screenOffCount} events recorded while device was completely inactive.")
-                        if (profile.uploadSpikes > 0) PatternAlert("Data Exfiltration", "${profile.uploadSpikes} high-volume network uploads occurred immediately after sensor access.")
-                        if (profile.multiSensorCount > 0) PatternAlert("Sensor Aggregation", "Detected ${profile.multiSensorCount} instances of multiple sensors being polled simultaneously.")
+                        if (profile.screenOffCount > 0) PatternAlert("Inactivity Surveillance", "App accessed hardware while the device was completely inactive.")
                         
                         if (events.any { it.sensorType == "DELAYED_EXFILTRATION" }) {
-                             PatternAlert("Harvest-and-Leak Pattern", "Detected data harvesting during sensor use followed by background exfiltration.")
+                             PatternAlert("Harvest-and-Leak Pattern", "Detected a delay between sensor access and data upload, suggesting harvesting.")
                         }
 
-                        if (profile.backgroundCount > 0 && profile.foregroundRate > 0.9) {
-                            PatternAlert("Background Deviation", "This app is normally 90%+ foreground, but background access was recently recorded.")
+                        if (profile.backgroundCount > 3 && profile.foregroundRate > 0.95) {
+                            PatternAlert("Background Deviation", "This app is strictly foreground-only, but background access was recorded.")
                         }
 
-                        if (profile.screenOffCount == 0 && profile.uploadSpikes == 0 && profile.multiSensorCount == 0 && profile.backgroundCount <= 3 && !events.any { it.sensorType.contains("NETWORK") || it.sensorType.contains("EXFILTRATION") }) {
+                        if (profile.lastRiskCategory == "EXPECTED" && profile.statisticalAnomalyCount == 0 && profile.screenOffCount == 0) {
                             Text("No major behavioral deviations identified against baseline profile.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
@@ -988,7 +997,8 @@ fun BehaviorProfileCard(profile: AppBehaviorProfile, onClick: () -> Unit) {
                 }
                 Spacer(Modifier.width(16.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(profile.packageName.split(".").last().replaceFirstChar { it.uppercase() }, fontWeight = FontWeight.Bold)
+                    val appName = profile.packageName.split(".").last().replaceFirstChar { it.uppercase() }
+                    Text(appName, fontWeight = FontWeight.Bold)
                     Text(profile.packageName, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 val risk = profile.lastRiskCategory
@@ -1013,8 +1023,11 @@ fun BehaviorProfileCard(profile: AppBehaviorProfile, onClick: () -> Unit) {
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Spacer(Modifier.height(16.dp))
 
-            val windowText = if (profile.typicalHours.isNotEmpty()) {
-                "${profile.typicalHours.first()}:00 – ${profile.typicalHours.last()}:00"
+            val activeHours = profile.typicalHours
+            val windowText = if (activeHours.isNotEmpty()) {
+                val start = activeHours.first()
+                val end = activeHours.last()
+                if (start == end) "$start:00" else "$start:00 – $end:00"
             } else {
                 "Calculating..."
             }
@@ -1030,10 +1043,10 @@ fun BehaviorProfileCard(profile: AppBehaviorProfile, onClick: () -> Unit) {
                 }
             }
             
-            if (profile.screenOffCount > 0 || profile.uploadSpikes > 0 || profile.multiSensorCount > 0) {
+            if (profile.screenOffCount > 0 || profile.uploadSpikes > 0 || profile.statisticalAnomalyCount > 0) {
                 Spacer(Modifier.height(12.dp))
-                if (profile.screenOffCount > 0) PatternAlert("Screen-Off Surveillance", "Detected while inactive")
-                if (profile.uploadSpikes > 0) PatternAlert("Data Exfiltration", "High correlated upload")
+                if (profile.statisticalAnomalyCount > 0) PatternAlert("Network Volatility", "Improbable data spikes detected")
+                else if (profile.screenOffCount > 0) PatternAlert("Screen-Off Surveillance", "Detected while inactive")
             }
         }
     }

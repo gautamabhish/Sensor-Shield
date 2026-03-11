@@ -2,16 +2,17 @@ package com.example.sensor_shield.service
 
 import android.app.*
 import android.app.AppOpsManager.OnOpActiveChangedListener
+import android.app.usage.NetworkStats
+import android.app.usage.NetworkStatsManager
 import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.content.pm.ServiceInfo
 import android.hardware.camera2.CameraManager
 import android.media.AudioManager
 import android.media.AudioRecordingConfiguration
-import android.net.TrafficStats
+import android.net.ConnectivityManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -42,10 +43,10 @@ class SensorMonitorService : Service() {
 
     private lateinit var powerManager: PowerManager
     private lateinit var usageStatsManager: UsageStatsManager
+    private lateinit var networkStatsManager: NetworkStatsManager
     private lateinit var audioManager: AudioManager
     private lateinit var cameraManager: CameraManager
     private lateinit var appOpsManager: AppOpsManager
-    private lateinit var activityManager: ActivityManager
 
     private val lastTxBytes = ConcurrentHashMap<String, Long>()
     private val lastSensorAccess = ConcurrentHashMap<String, Long>()
@@ -54,12 +55,7 @@ class SensorMonitorService : Service() {
 
     private val opListener = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
         OnOpActiveChangedListener { op, _, packageName, active ->
-            if (active) {
-                val pkg = if (packageName == "com.google.android.gms") getForegroundPackageName() else packageName
-                if (pkg != null && pkg != "unknown") {
-                    handleSensorActivation(pkg, op)
-                }
-            }
+            if (active && packageName != "unknown") handleSensorActivation(packageName, op)
         }
     } else null
 
@@ -67,32 +63,22 @@ class SensorMonitorService : Service() {
         super.onCreate()
         powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         usageStatsManager = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+        networkStatsManager = getSystemService(Context.NETWORK_STATS_SERVICE) as NetworkStatsManager
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         cameraManager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
         appOpsManager = getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
-        activityManager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
 
         createNotificationChannels()
-        startForeground(notificationId, createNotification("Security Core Active"))
+        startForeground(notificationId, createNotification("Security Intelligence Active"))
 
         setupMonitoring()
         startPollingLoop() 
     }
 
-    private fun normalizeSensorName(op: String): String {
-        return when {
-            op.contains("camera", true) -> "CAMERA"
-            op.contains("audio", true) || op.contains("mic", true) -> "MICROPHONE"
-            op.contains("location", true) -> "LOCATION"
-            else -> op.replace("android:", "").uppercase()
-        }
-    }
-
     private fun setupMonitoring() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && opListener != null) {
             val ops = arrayOf(AppOpsManager.OPSTR_CAMERA, AppOpsManager.OPSTR_RECORD_AUDIO, AppOpsManager.OPSTR_FINE_LOCATION)
-            val executor = ContextCompat.getMainExecutor(this)
-            ops.forEach { op -> try { appOpsManager.startWatchingActive(arrayOf(op), executor, opListener) } catch (e: Exception) { } }
+            ops.forEach { op -> try { appOpsManager.startWatchingActive(arrayOf(op), ContextCompat.getMainExecutor(this), opListener) } catch (e: Exception) { } }
         }
 
         cameraManager.registerAvailabilityCallback(object : CameraManager.AvailabilityCallback() {
@@ -116,223 +102,156 @@ class SensorMonitorService : Service() {
                 val fg = getForegroundPackageName()
                 if (fg != "unknown") watchList.add(fg)
                 
-                checkLocationUsage(fg)
                 monitorWatchlistTraffic()
                 
-                // Cleanup watchlist (keep apps that were foreground or used sensor recently)
+                // Cleanup watchlist (apps inactive for 15 mins)
                 val now = System.currentTimeMillis()
-                val iterator = watchList.iterator()
-                while (iterator.hasNext()) {
-                    val pkg = iterator.next()
-                    val lastAccess = lastSensorAccess[pkg] ?: 0L
-                    if (pkg != fg && now - lastAccess > 15 * 60 * 1000) {
-                        iterator.remove()
-                    }
-                }
+                watchList.removeIf { pkg -> (now - (lastSensorAccess[pkg] ?: 0L)) > 15 * 60 * 1000 && pkg != fg }
                 
-                delay(12000) 
+                delay(10000) 
             }
         }
     }
 
-    private fun checkLocationUsage(fgPkg: String) {
-        if (fgPkg == "unknown" || fgPkg == packageName) return
-        try {
-            val uid = packageManager.getApplicationInfo(fgPkg, 0).uid
-            val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                appOpsManager.unsafeCheckOpNoThrow(AppOpsManager.OPSTR_FINE_LOCATION, uid, fgPkg)
-            } else {
-                @Suppress("DEPRECATION")
-                appOpsManager.checkOpNoThrow(AppOpsManager.OPSTR_FINE_LOCATION, uid, fgPkg)
+    private fun getUidTxBytes(uid: Int): Long {
+        return try {
+            val bucket = networkStatsManager.querySummaryForUser(ConnectivityManager.TYPE_WIFI, null, 0, System.currentTimeMillis())
+            var total = 0L
+            val entry = NetworkStats.Bucket()
+            while (bucket.hasNextBucket()) {
+                bucket.getNextBucket(entry)
+                if (entry.uid == uid) total += entry.txBytes
             }
-            if (mode == AppOpsManager.MODE_ALLOWED) handleSensorActivation(fgPkg, "LOCATION")
-        } catch (e: Exception) { }
-    }
-
-    private fun getSafeTxBytes(uid: Int): Long {
-        val tx = TrafficStats.getUidTxBytes(uid)
-        return if (tx == TrafficStats.UNSUPPORTED.toLong()) 0L else tx
+            // Add Mobile data as well
+            val mobileBucket = networkStatsManager.querySummaryForUser(ConnectivityManager.TYPE_MOBILE, null, 0, System.currentTimeMillis())
+            while (mobileBucket.hasNextBucket()) {
+                mobileBucket.getNextBucket(entry)
+                if (entry.uid == uid) total += entry.txBytes
+            }
+            total
+        } catch (e: Exception) { 0L }
     }
 
     private fun monitorWatchlistTraffic() {
-        val now = System.currentTimeMillis()
         val foregroundPkg = getForegroundPackageName()
+        val now = System.currentTimeMillis()
 
         watchList.forEach { pkg ->
             try {
                 val uid = packageManager.getApplicationInfo(pkg, 0).uid
-                val currentTx = getSafeTxBytes(uid)
-                if (currentTx <= 0) return@forEach
-
-                val prevTx = lastTxBytes[pkg]
-                if (prevTx == null) {
+                val currentTx = getUidTxBytes(uid)
+                val prevTx = lastTxBytes[pkg] ?: run {
                     lastTxBytes[pkg] = currentTx
                     return@forEach
                 }
 
-                val delta = (currentTx - prevTx).coerceAtLeast(0)
-                
-                if (delta > 0) { // Log even small movements for accurate sums
-                    val isForeground = (pkg == foregroundPkg)
+                val delta = currentTx - prevTx
+                if (delta > 1024) { // Log any upload > 1KB
                     val lastSensorTime = lastSensorAccess[pkg] ?: 0L
+                    val isDelayedExfil = (now - lastSensorTime) < 20 * 60 * 1000 && delta > 500 * 1024
                     
-                    if (!isForeground && (now - lastSensorTime) < 20 * 60 * 1000 && delta > 500 * 1024) {
-                        logAnomalousEvent(pkg, "DELAYED_EXFILTRATION", delta, false)
-                    } else {
-                        logAnomalousEvent(pkg, "NETWORK", delta, isForeground)
-                    }
+                    logEvent(pkg, if (isDelayedExfil) "DELAYED_EXFILTRATION" else "NETWORK", delta, pkg == foregroundPkg)
                     lastTxBytes[pkg] = currentTx
                 }
             } catch (e: Exception) { watchList.remove(pkg) }
         }
     }
 
-    private fun logAnomalousEvent(packageName: String, type: String, bytes: Long, isForeground: Boolean) {
-        serviceScope.launch {
-            try {
-                val db = AppDatabase.getDatabase(applicationContext)
-                if (db.sensorDao().isTrusted(packageName)) return@launch
-
-                val category = when {
-                    type == "DELAYED_EXFILTRATION" -> "CRITICAL"
-                    !isForeground && bytes > 2 * 1024 * 1024 -> "SUSPICIOUS"
-                    else -> "EXPECTED"
-                }
-
-                db.sensorDao().insertEvent(
-                    SensorEvent(
-                        packageName = packageName,
-                        sensorType = type,
-                        isForeground = isForeground,
-                        riskScore = if (category == "CRITICAL") 0.95 else if (category == "SUSPICIOUS") 0.65 else 0.0,
-                        riskCategory = category,
-                        isAnomalous = category != "EXPECTED",
-                        isScreenOff = !powerManager.isInteractive,
-                        bytesUploaded = bytes
-                    )
-                )
-                if (category == "CRITICAL" || category == "SUSPICIOUS") showRiskNotification(packageName, type, bytes)
-            } catch (e: Exception) {}
-        }
-    }
-
     private fun handleSensorActivation(packageName: String, op: String) {
         if (packageName == this.packageName || packageName == "unknown") return
+        val normalized = when {
+            op.contains("camera", true) -> "CAMERA"
+            op.contains("audio", true) || op.contains("mic", true) -> "MICROPHONE"
+            else -> "LOCATION"
+        }
         
-        val normalizedOp = normalizeSensorName(op)
-        val dedupeKey = "$packageName:$normalizedOp"
-        if (System.currentTimeMillis() - (recentlyLogged[dedupeKey] ?: 0L) < 20000) return
-        
-        recentlyLogged[dedupeKey] = System.currentTimeMillis()
+        val key = "$packageName:$normalized"
+        if (System.currentTimeMillis() - (recentlyLogged[key] ?: 0L) < 15000) return
+        recentlyLogged[key] = System.currentTimeMillis()
         lastSensorAccess[packageName] = System.currentTimeMillis()
         watchList.add(packageName)
 
         serviceScope.launch {
             val uid = try { packageManager.getApplicationInfo(packageName, 0).uid } catch (e: Exception) { -1 }
-            val startTx = if (uid != -1) getSafeTxBytes(uid) else 0L
-            delay(15000)
-            val endTx = if (uid != -1) getSafeTxBytes(uid) else 0L
-            val bytesUploaded = (endTx - startTx).coerceAtLeast(0L)
+            val startTx = if (uid != -1) getUidTxBytes(uid) else 0L
+            delay(12000)
+            val endTx = if (uid != -1) getUidTxBytes(uid) else 0L
+            val bytes = (endTx - startTx).coerceAtLeast(0L)
 
-            val isForeground = (packageName == getForegroundPackageName())
-            val risk = RiskEngine.calculateRisk(packageName, op, isForeground, powerManager.isInteractive, getInstallSource(packageName))
-            val finalCategory = if (bytesUploaded > 300 * 1024) AccessCategory.CRITICAL else risk.category
+            val isFg = (packageName == getForegroundPackageName())
+            val risk = RiskEngine.calculateRisk(packageName, normalized, isFg, powerManager.isInteractive)
+            
+            logEvent(packageName, normalized, bytes, isFg, risk.category.name)
+            if (risk.category != AccessCategory.EXPECTED) showAlert(packageName, normalized, bytes)
+        }
+    }
 
+    private fun logEvent(pkg: String, type: String, bytes: Long, isFg: Boolean, category: String? = null) {
+        serviceScope.launch {
             try {
                 val db = AppDatabase.getDatabase(applicationContext)
-                if (db.sensorDao().isTrusted(packageName)) return@launch
-                db.sensorDao().insertEvent(
-                    SensorEvent(
-                        packageName = packageName,
-                        sensorType = normalizedOp,
-                        isForeground = isForeground,
-                        riskScore = if (finalCategory == AccessCategory.CRITICAL) 1.0 else risk.score,
-                        riskCategory = finalCategory.name,
-                        isAnomalous = finalCategory != AccessCategory.EXPECTED,
-                        isScreenOff = !powerManager.isInteractive,
-                        bytesUploaded = bytesUploaded
-                    )
-                )
-                if (finalCategory != AccessCategory.EXPECTED) showRiskNotification(packageName, normalizedOp, bytesUploaded)
-            } catch (e: Exception) { }
+                if (db.sensorDao().isTrusted(pkg)) return@launch
+                
+                db.sensorDao().insertEvent(SensorEvent(
+                    packageName = pkg,
+                    sensorType = type,
+                    isForeground = isFg,
+                    riskScore = if (category == "CRITICAL") 0.9 else if (category == "SUSPICIOUS") 0.5 else 0.0,
+                    riskCategory = category ?: "EXPECTED",
+                    isAnomalous = category != "EXPECTED" && category != null,
+                    isScreenOff = !powerManager.isInteractive,
+                    bytesUploaded = bytes
+                ))
+            } catch (e: Exception) {}
         }
     }
 
     private fun getForegroundPackageName(): String {
         val end = System.currentTimeMillis()
-        val begin = end - 15000
-        val events = usageStatsManager.queryEvents(begin, end)
+        val events = usageStatsManager.queryEvents(end - 10000, end)
         val event = UsageEvents.Event()
         var lastPkg = "unknown"
         while (events.hasNextEvent()) {
             events.getNextEvent(event)
-            if (event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND) {
-                lastPkg = event.packageName
-            }
+            if (event.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND) lastPkg = event.packageName
         }
         return lastPkg
     }
 
-    private fun getInstallSource(packageName: String): String? {
-        return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) packageManager.getInstallSourceInfo(packageName).installingPackageName
-            else @Suppress("DEPRECATION") packageManager.getInstallerPackageName(packageName)
-        } catch (e: Exception) { null }
-    }
+    private fun showAlert(pkg: String, sensor: String, bytes: Long) {
+        val appName = pkg.split(".").last().replaceFirstChar { it.uppercase() }
+        val content = if (bytes > 0) "Critical Leak: $appName sent ${formatBytes(bytes)} during $sensor use!" 
+                     else "$appName is accessing $sensor in the background."
 
-    private fun showRiskNotification(packageName: String, sensor: String, bytes: Long) {
-        val appName = packageName.split(".").last().replaceFirstChar { it.uppercase() }
-        val title = if (sensor == "DELAYED_EXFILTRATION") "⚠️ HARVEST-AND-LEAK DETECTED" else "🛡️ Sensor Shield Alert"
-        val content = if (sensor == "DELAYED_EXFILTRATION") "CRITICAL: $appName is uploading ${bytes/1024}KB after earlier sensor use!"
-                     else if (bytes > 0) "DATA LEAK: $appName sent ${bytes/1024}KB during $sensor use!" 
-                     else "$appName accessing $sensor in background."
-
-        val killIntent = Intent(this, NotificationActionActivity::class.java).apply {
+        val killIntent = Intent(this, NotificationActionActivity::class.java).apply { 
             action = ACTION_KILL_APP
-            putExtra(EXTRA_PACKAGE_NAME, packageName)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            putExtra(EXTRA_PACKAGE_NAME, pkg)
         }
-        val killPendingIntent = PendingIntent.getActivity(this, packageName.hashCode() + 1, killIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-
-        val trustIntent = Intent(this, NotificationActionActivity::class.java).apply {
-            action = ACTION_TRUST_APP
-            putExtra(EXTRA_PACKAGE_NAME, packageName)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-        }
-        val trustPendingIntent = PendingIntent.getActivity(this, packageName.hashCode() + 2, trustIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val killPending = PendingIntent.getActivity(this, pkg.hashCode(), killIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
 
         val notification = NotificationCompat.Builder(this, alertChannelId)
-            .setContentTitle(title)
+            .setContentTitle("🛡️ Sensor Shield Alert")
             .setContentText(content)
             .setSmallIcon(android.R.drawable.stat_sys_warning)
             .setPriority(NotificationCompat.PRIORITY_MAX)
-            .setDefaults(NotificationCompat.DEFAULT_ALL)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setCategory(NotificationCompat.CATEGORY_ALARM)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Kill App", killPendingIntent)
-            .addAction(android.R.drawable.ic_menu_save, "Trust App", trustPendingIntent)
-            .setAutoCancel(true)
-            .build()
-        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(packageName.hashCode(), notification)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Kill App", killPending)
+            .setAutoCancel(true).build()
+        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(pkg.hashCode(), notification)
     }
+
+    private fun formatBytes(bytes: Long): String = if (bytes >= 1024 * 1024) "%.1f MB".format(bytes/1048576f) else "${bytes/1024} KB"
 
     private fun createNotificationChannels() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(NotificationChannel(channelId, "Security Service", NotificationManager.IMPORTANCE_LOW))
-            manager.createNotificationChannel(NotificationChannel(alertChannelId, "Breach Alerts", NotificationManager.IMPORTANCE_HIGH).apply {
-                enableVibration(true)
-                setLockscreenVisibility(Notification.VISIBILITY_PUBLIC)
-            })
+            val nm = getSystemService(NotificationManager::class.java)
+            nm.createNotificationChannel(NotificationChannel(channelId, "Monitor", NotificationManager.IMPORTANCE_LOW))
+            nm.createNotificationChannel(NotificationChannel(alertChannelId, "Alerts", NotificationManager.IMPORTANCE_HIGH).apply { enableVibration(true) })
         }
     }
 
-    private fun createNotification(text: String): Notification {
-        return NotificationCompat.Builder(this, channelId)
-            .setContentTitle("Sensor Shield Pro").setContentText(text)
-            .setSmallIcon(android.R.drawable.ic_lock_idle_lock).setOngoing(true).build()
-    }
+    private fun createNotification(txt: String) = NotificationCompat.Builder(this, channelId)
+        .setContentTitle("Sensor Shield Pro").setContentText(txt)
+        .setSmallIcon(android.R.drawable.ic_lock_idle_lock).setOngoing(true).build()
 
-    override fun onDestroy() { serviceScope.cancel(); super.onDestroy() }
-    override fun onBind(intent: Intent?): IBinder? = null
+    override fun onBind(intent: Intent?) = null
 }

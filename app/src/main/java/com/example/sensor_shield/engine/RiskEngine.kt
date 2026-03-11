@@ -1,7 +1,7 @@
 package com.example.sensor_shield.engine
 
 enum class AccessCategory {
-    EXPECTED, SUSPICIOUS, CRITICAL
+    EXPECTED, SUSPICIOUS, CRITICAL, STATISTICAL_ANOMALY
 }
 
 object RiskEngine {
@@ -16,7 +16,6 @@ object RiskEngine {
 
         var score = 0.0
 
-        // 1. Base Sensitivity
         val isHighlySensitive = sensorType.contains("camera") || 
                                sensorType.contains("record_audio") || 
                                sensorType.contains("microphone")
@@ -27,7 +26,6 @@ object RiskEngine {
             sensorType.contains("location") -> score += 0.15
         }
 
-        // 2. Contextual Red Flags - Background usage is the primary concern
         if (!isForeground) {
             score += 0.45
         }
@@ -37,15 +35,11 @@ object RiskEngine {
             if (isHighlySensitive) score += 0.15
         }
 
-        // 3. Trust Adjustment - Recognizes common legitimate apps
         score += trustAdjustment(packageName)
-
-        // 4. Install Source Adjustment
         score += installSourceAdjustment(installSource)
 
         val finalScore = score.coerceIn(0.0, 1.0)
 
-        // 5. Categorization Logic - Simplified to Expected, Suspicious, Critical
         val category = when {
             finalScore >= 0.75 || (isHighlySensitive && !isScreenOn && !isForeground && trustAdjustment(packageName) > -0.1) -> AccessCategory.CRITICAL
             finalScore >= 0.45 -> AccessCategory.SUSPICIOUS
@@ -62,38 +56,22 @@ object RiskEngine {
     private fun trustAdjustment(packageName: String): Double {
         val pkg = packageName.lowercase()
         return when {
-            // System and Core Apps (Highest Trust)
             pkg.contains("incallui") || pkg.contains("dialer") || pkg.contains("phone") || pkg.contains("telephony") -> -0.40
             pkg.startsWith("com.android.") || pkg.startsWith("android.system") -> -0.30
             pkg.startsWith("com.google.android.gms") || pkg.startsWith("com.google.android.apps.maps") -> -0.25
-            
-            // Trusted Social & Communication (Known to use sensors frequently)
             pkg == "com.whatsapp" || pkg == "com.whatsapp.w4b" -> -0.20
-            pkg.contains("snapchat") -> -0.15
-            pkg.contains("instagram") -> -0.15
-            pkg.contains("facebook.katana") || pkg.contains("facebook.orca") -> -0.15
-            pkg.contains("telegram.messenger") || pkg.contains("org.telegram") -> -0.15
-            
-            // Productivity & Scanning (Expected Camera use)
-            pkg.contains("adobe.scan") || pkg.contains("com.adobe.reader") -> -0.15
-            pkg.contains("microsoft.office") || pkg.contains("microsoft.teams") || pkg.contains("skype") -> -0.15
-            
-            // Multimedia & Conferencing
-            pkg.contains("zoom.videomeetings") || pkg.contains("webex") -> -0.15
-            pkg.contains("spotify") || pkg.contains("youtube") -> -0.10
-
-            // Default for unknown apps
+            pkg.contains("snapchat") || pkg.contains("instagram") || pkg.contains("facebook") || pkg.contains("telegram") -> -0.15
+            pkg.contains("adobe.scan") || pkg.contains("microsoft.office") || pkg.contains("zoom") -> -0.15
             else -> 0.10 
         }
     }
 
     private fun installSourceAdjustment(installSource: String?): Double {
         return when (installSource) {
-            "com.android.vending" -> -0.15 // Google Play Store (High Trust)
-            "com.amazon.venezia" -> -0.10 // Amazon Appstore
-            "com.sec.android.app.samsungapps" -> -0.10 // Samsung Galaxy Store
-            null, "" -> 0.15 // Sideloaded (ADB or unknown) - Higher risk
-            else -> 0.05 // Other sources (Third party stores)
+            "com.android.vending" -> -0.15
+            "com.amazon.venezia", "com.sec.android.app.samsungapps" -> -0.10
+            null, "" -> 0.15
+            else -> 0.05
         }
     }
 

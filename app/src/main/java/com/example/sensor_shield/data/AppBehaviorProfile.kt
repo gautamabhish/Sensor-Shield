@@ -13,6 +13,7 @@ data class AppBehaviorProfile(
     val screenOffCount: Int = 0,
     val multiSensorCount: Int = 0,
     val uploadSpikes: Int = 0,
+    val statisticalAnomalyCount: Int = 0, // Added this new field
     val totalBytesUploaded: Long = 0,
     val lastRiskCategory: String = "EXPECTED"
 )
